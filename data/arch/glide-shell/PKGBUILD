@@ -1,6 +1,6 @@
 pkgbase=glide-shell
 pkgname=(glide-shell glide-configd xdg-desktop-portal-glide glide)
-pkgver=0.1.r0.g0000000
+pkgver=0.r474.g4e765af
 pkgrel=1
 pkgdesc="Glide desktop shell"
 arch=(x86_64)
@@ -10,12 +10,16 @@ makedepends=(git cargo pkgconf)
 options=(!lto !debug)
 _git="${GLIDE_GIT:-https://github.com/Glide-Desktop}"
 _target="${GLIDE_CARGO_TARGET:-target}"
-source=("$pkgbase::git+$_git/glide-shell.git")
+source=("$pkgbase::git+$_git/glide-shell")
 sha256sums=('SKIP')
 
 pkgver() {
     cd "$pkgbase"
-    printf '0.1.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+    if tag="$(git describe --long --tags --abbrev=7 2>/dev/null)"; then
+        printf '%s' "$tag" | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+    else
+        printf '0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+    fi
 }
 
 prepare() {
@@ -79,7 +83,7 @@ package_glide-shell() {
     install -Dm644 data/dbus/org.glide.Shell1.xml "$pkgdir/usr/share/dbus-1/interfaces/org.glide.Shell1.xml"
     sed 's|command = "glide --greeter"|command = "/usr/bin/glide --greeter"|' data/greetd-glide.toml \
         > greetd-config.toml
-    install -Dm644 greetd-config.toml "$pkgdir/usr/share/doc/glide-shell/greetd-config.toml"
+    install -Dm644 greetd-config.toml "$pkgdir/usr/share/glide-shell/greetd-config.toml"
     install -Dm755 scripts/migrate-from-local.sh "$pkgdir/usr/share/glide-shell/migrate-from-local.sh"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

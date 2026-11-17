@@ -13,7 +13,7 @@ _greeter() {
         echo ">>> points it at /usr/bin/glide."
     elif ! [ -f /etc/greetd/config.toml ] || ! grep -q 'glide --greeter' /etc/greetd/config.toml; then
         echo ">>> To log in through Glide's own greeter, copy"
-        echo ">>> /usr/share/doc/glide-shell/greetd-config.toml to /etc/greetd/config.toml"
+        echo ">>> /usr/share/glide-shell/greetd-config.toml to /etc/greetd/config.toml"
         echo ">>> and enable greetd.service."
     fi
 }
