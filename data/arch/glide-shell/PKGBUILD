@@ -59,7 +59,7 @@ package_glide-shell() {
         adw-gtk-theme qt6ct qt5ct kvantum
     )
     optdepends=(
-        'colloid-icon-theme-git: the default icon theme (served by the Glide pacman repository)'
+        'glide-icon-theme: the default icon theme (Papirus is used without it)'
         'networkmanager-openvpn: importing OpenVPN connections'
         'noto-fonts-cjk: Chinese, Japanese and Korean text'
         'netbird: NetBird VPN integration'
@@ -127,6 +127,6 @@ package_glide-desktop() {
         glide-keychain glide-facekey
         glide-settings glide-files glide-terminal glide-text
         glide-passwords glide-photos glide-folio glide-clips glide-phone
+        glide-icon-theme
     )
-    optdepends=('colloid-icon-theme-git: the default icon theme (served by the Glide pacman repository)')
 }

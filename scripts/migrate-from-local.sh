@@ -139,9 +139,11 @@ for f in $(overwritten); do
 done
 CONFIRM=""
 [ "$YES" -eq 1 ] && CONFIRM="--noconfirm"
-if pacman -Qq glide-secret-service >/dev/null 2>&1; then
-    run pacman -Rdd $CONFIRM glide-secret-service
-fi
+for replaced in glide-secret-service colloid-icon-theme-git colloid-icon-theme; do
+    if pacman -Qq "$replaced" >/dev/null 2>&1; then
+        run pacman -Rdd $CONFIRM "$replaced"
+    fi
+done
 if [ -n "$PACKAGES" ]; then
     # shellcheck disable=SC2086
     run pacman -U --needed $CONFIRM $OVERWRITE $PACKAGES
