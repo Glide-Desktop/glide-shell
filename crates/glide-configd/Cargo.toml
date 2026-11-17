@@ -7,8 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-glide-config = { path = "../glide-config" }
-glide-ipc = { path = "../glide-ipc" }
+glide-config.workspace = true
+glide-ipc.workspace = true
 rusqlite = "0.41"
 serde.workspace = true
 serde_json.workspace = true

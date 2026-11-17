@@ -28,29 +28,29 @@ toml.workspace = true
 toml_edit = "0.25"
 libc = "0.2"
 rqrr = "0.10"
-glide-appmenu = { path = "../glide-appmenu" }
+glide-appmenu.workspace = true
 glide-cast = { path = "../glide-cast" }
-glide-config = { path = "../glide-config" }
+glide-config.workspace = true
 glide-dock = { path = "../glide-dock" }
-glide-geom = { path = "../glide-geom" }
+glide-geom.workspace = true
 glide-gestures = { path = "../glide-gestures" }
 glide-greeter = { path = "../glide-greeter" }
-glide-ipc = { path = "../glide-ipc" }
+glide-ipc.workspace = true
 glide-launcher = { path = "../glide-launcher" }
 glide-layout = { path = "../glide-layout" }
 glide-media = { path = "../glide-media" }
-glide-netbird = { path = "../glide-netbird" }
+glide-netbird.workspace = true
 glide-notify = { path = "../glide-notify" }
 glide-overlays = { path = "../glide-overlays" }
-glide-paint = { path = "../glide-paint" }
+glide-paint.workspace = true
 glide-services = { path = "../glide-services" }
 glide-shell = { path = "../glide-shell" }
 glide-shot = { path = "../glide-shot" }
 glide-system = { path = "../glide-system" }
-glide-theme = { path = "../glide-theme" }
+glide-theme.workspace = true
 glide-topbar = { path = "../glide-topbar" }
 glide-tray = { path = "../glide-tray" }
-glide-ui = { path = "../glide-ui" }
+glide-ui.workspace = true
 profiling = "1.0.18"
 wayland-backend = "0.3"
 wayland-scanner = "0.31"
@@ -58,7 +58,7 @@ wayland-server = "0.31"
 tracy-client = { version = "0.18.4", optional = true }
 zbus.workspace = true
 zeroize = "1"
-glide-app = { path = "../glide-app" }
+glide-app.workspace = true
 tiny-skia = "0.12.0"
 
 [dependencies.smithay]

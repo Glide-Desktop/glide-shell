@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-glide-geom = { path = "../glide-geom" }
+glide-geom.workspace = true
 
 [lints]
 workspace = true

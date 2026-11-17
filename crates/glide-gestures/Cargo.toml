@@ -7,10 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-glide-ipc = { path = "../glide-ipc" }
+glide-ipc.workspace = true
 glide-layout = { path = "../glide-layout" }
-glide-theme = { path = "../glide-theme" }
-glide-ui = { path = "../glide-ui" }
+glide-theme.workspace = true
+glide-ui.workspace = true
 serde.workspace = true
 smithay.workspace = true
 

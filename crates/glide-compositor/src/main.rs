@@ -74,7 +74,6 @@ mod super_keys;
 mod surface_fade;
 mod tiling;
 mod tray;
-mod welcome;
 mod window;
 mod window_traits;
 mod xembed;
@@ -318,7 +317,6 @@ fn init_session_services(
     init_phone(event_loop);
     init_keychain(event_loop, state);
     init_cast(event_loop, state);
-    state.welcome_if_first_run();
     if !greeter::pam::available() {
         tracing::warn!("PAM is unavailable: the screen will not lock on idle, and a manual lock cannot be undone");
     }

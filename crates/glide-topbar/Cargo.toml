@@ -7,18 +7,18 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-glide-app = { path = "../glide-app" }
-glide-appmenu = { path = "../glide-appmenu" }
-glide-config = { path = "../glide-config" }
-glide-ipc = { path = "../glide-ipc" }
-glide-netbird = { path = "../glide-netbird" }
+glide-app.workspace = true
+glide-appmenu.workspace = true
+glide-config.workspace = true
+glide-ipc.workspace = true
+glide-netbird.workspace = true
 glide-notify = { path = "../glide-notify" }
-glide-paint = { path = "../glide-paint" }
+glide-paint.workspace = true
 glide-shell = { path = "../glide-shell" }
 glide-system = { path = "../glide-system" }
-glide-theme = { path = "../glide-theme" }
+glide-theme.workspace = true
 glide-tray = { path = "../glide-tray" }
-glide-ui = { path = "../glide-ui" }
+glide-ui.workspace = true
 libc = "0.2"
 smithay = { workspace = true, features = ["wayland_frontend"] }
 tracing.workspace = true

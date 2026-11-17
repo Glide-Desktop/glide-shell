@@ -14,7 +14,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-glide-ipc = { path = "../glide-ipc" }
-glide-theme = { path = "../glide-theme" }
+glide-ipc.workspace = true
+glide-theme.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

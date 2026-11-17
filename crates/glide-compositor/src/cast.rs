@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn the_notice_id_is_its_own() {
         assert!(crate::notifications::is_local(NOTICE_ID));
-        for other in [crate::autofill::FILL_ID, crate::otp::OFFER_ID, crate::welcome::NOTICE_ID] {
+        for other in [crate::autofill::FILL_ID, crate::otp::OFFER_ID] {
             assert_ne!(NOTICE_ID, other);
         }
     }

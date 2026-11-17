@@ -9,11 +9,11 @@ repository.workspace = true
 [dependencies]
 glide-launcher = { path = "../glide-launcher" }
 glide-layout = { path = "../glide-layout" }
-glide-paint = { path = "../glide-paint" }
+glide-paint.workspace = true
 glide-shell = { path = "../glide-shell" }
-glide-theme = { path = "../glide-theme" }
+glide-theme.workspace = true
 glide-topbar = { path = "../glide-topbar" }
-glide-ui = { path = "../glide-ui" }
+glide-ui.workspace = true
 smithay = { workspace = true, features = ["wayland_frontend"] }
 
 [lints]

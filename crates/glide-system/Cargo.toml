@@ -8,10 +8,10 @@ repository.workspace = true
 
 [dependencies]
 bitflags.workspace = true
-glide-config = { path = "../glide-config" }
-glide-paint = { path = "../glide-paint" }
+glide-config.workspace = true
+glide-paint.workspace = true
 glide-shell = { path = "../glide-shell" }
-glide-theme = { path = "../glide-theme" }
+glide-theme.workspace = true
 libc = "0.2"
 serde_json.workspace = true
 smithay = { workspace = true, features = ["backend_udev"] }

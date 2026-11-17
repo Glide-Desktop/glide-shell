@@ -230,6 +230,5 @@ mod tests {
     fn the_fill_toast_id_is_its_own() {
         assert!(crate::notifications::is_local(FILL_ID));
         assert_ne!(FILL_ID, crate::otp::OFFER_ID);
-        assert_ne!(FILL_ID, crate::welcome::NOTICE_ID);
     }
 }

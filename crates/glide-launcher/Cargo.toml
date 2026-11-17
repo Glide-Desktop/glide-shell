@@ -7,12 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-glide-config = { path = "../glide-config" }
-glide-netbird = { path = "../glide-netbird" }
-glide-paint = { path = "../glide-paint" }
+glide-config.workspace = true
+glide-netbird.workspace = true
+glide-paint.workspace = true
 glide-shell = { path = "../glide-shell" }
-glide-theme = { path = "../glide-theme" }
-glide-ui = { path = "../glide-ui" }
+glide-theme.workspace = true
+glide-ui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 smithay = { workspace = true, features = ["wayland_frontend"] }

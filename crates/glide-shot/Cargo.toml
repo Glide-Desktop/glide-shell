@@ -7,10 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-glide-paint = { path = "../glide-paint" }
+glide-paint.workspace = true
 glide-shell = { path = "../glide-shell" }
-glide-theme = { path = "../glide-theme" }
-glide-ui = { path = "../glide-ui" }
+glide-theme.workspace = true
+glide-ui.workspace = true
 smithay = { workspace = true, features = ["wayland_frontend"] }
 tiny-skia = "0.12.0"
 
