@@ -1,5 +1,5 @@
 pkgbase=glide-shell
-pkgname=(glide-shell glide-configd xdg-desktop-portal-glide glide)
+pkgname=(glide-shell glide-configd xdg-desktop-portal-glide glide-desktop)
 pkgver=0.r474.g4e765af
 pkgrel=1
 pkgdesc="Glide desktop shell"
@@ -119,7 +119,7 @@ package_xdg-desktop-portal-glide() {
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
 
-package_glide() {
+package_glide-desktop() {
     pkgdesc="The Glide desktop: shell, settings service, portal, keychain and every Glide app"
     arch=(any)
     depends=(

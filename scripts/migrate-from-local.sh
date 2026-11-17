@@ -5,7 +5,8 @@
 # Usage: sudo scripts/migrate-from-local.sh [--dry-run] [--yes] [PACKAGE.pkg.tar.zst ...]
 #
 #   With package files, they are installed with pacman -U; without, the
-#   `glide` metapackage is installed from the configured repositories.
+#   `glide-desktop` metapackage is installed from the configured repositories
+#   (extra already has an unrelated `glide`).
 #
 # Order, so a working greeter exists at every step:
 #   1. back up every file this touches to /var/backups/glide-migrate-<time>.tar.gz
@@ -22,7 +23,7 @@
 # old installer copied are taken over by glide-facekey-models.
 #
 # Rollback: sudo tar -xzpPf /var/backups/glide-migrate-<time>.tar.gz
-# then remove the packages with pacman -Rns glide and its dependencies.
+# then remove the packages with pacman -Rns glide-desktop and its dependencies.
 set -eu
 
 DRY=0
@@ -113,8 +114,8 @@ existing() {
     return 0
 }
 
-if ! shadowing | existing | grep -q . && [ -x /usr/bin/glide ] && pacman -Qq glide >/dev/null 2>&1; then
-    echo "Nothing under $OLD and the glide package is installed: already migrated."
+if ! shadowing | existing | grep -q . && [ -x /usr/bin/glide ] && pacman -Qq glide-desktop >/dev/null 2>&1; then
+    echo "Nothing under $OLD and the glide-desktop package is installed: already migrated."
     exit 0
 fi
 
@@ -146,7 +147,7 @@ if [ -n "$PACKAGES" ]; then
     run pacman -U --needed $CONFIRM $OVERWRITE $PACKAGES
 else
     # shellcheck disable=SC2086
-    run pacman -S --needed $CONFIRM $OVERWRITE glide
+    run pacman -S --needed $CONFIRM $OVERWRITE glide-desktop
 fi
 if [ "$DRY" -eq 0 ] && ! [ -x /usr/bin/glide ]; then
     echo "error: /usr/bin/glide is missing after the install; nothing under $OLD was touched" >&2
