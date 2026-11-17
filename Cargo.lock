@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "glide-cast"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "glide-configd"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "glide-config",
  "glide-ipc",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "glide-dock"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "glide-paint",
  "glide-shell",
@@ -1047,7 +1047,7 @@ source = "git+https://github.com/Glide-Desktop/glide-libs?tag=v0.1.0#30b8a011d94
 
 [[package]]
 name = "glide-gestures"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "glide-ipc",
  "glide-layout",
@@ -1059,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "glide-greeter"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "glide-app",
@@ -1087,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "glide-launcher"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "glide-config",
  "glide-netbird",
@@ -1104,14 +1104,14 @@ dependencies = [
 
 [[package]]
 name = "glide-layout"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "glide-geom",
 ]
 
 [[package]]
 name = "glide-media"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "glide-notify"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "glide-config",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "glide-overlays"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "glide-launcher",
  "glide-layout",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "glide-portal"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "futures-channel",
  "glide-app",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "glide-services"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "enumflags2",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "glide-shell"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "glide-app",
  "glide-desktop",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "glide-shot"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "glide-paint",
  "glide-shell",
@@ -1240,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "glide-system"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "bitflags",
  "glide-config",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "glide-topbar"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "glide-app",
  "glide-appmenu",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "glide-tray"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -1301,7 +1301,7 @@ source = "git+https://github.com/Glide-Desktop/glide-libs?tag=v0.1.0#30b8a011d94
 
 [[package]]
 name = "glide-xembed"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "glide-tray",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "glidectl"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "glide-ipc",

@@ -9,7 +9,7 @@
 #   (extra already has an unrelated `glide`).
 #
 # Order, so a working greeter exists at every step:
-#   1. back up every file this touches to /var/backups/glide-migrate-<time>.tar.gz
+#   1. back up every file this touches to /var/backups/glide-migrate-<time>.tar.zst
 #   2. install the packages, overwriting only the exact files the old installer
 #      left outside /usr/local (which pacman would otherwise refuse)
 #   3. point greetd and the FaceKey PAM lines at /usr/bin
@@ -22,7 +22,7 @@
 # (they name the module, not a path). The FaceKey models and ONNX Runtime the
 # old installer copied are taken over by glide-facekey-models.
 #
-# Rollback: sudo tar -xzpPf /var/backups/glide-migrate-<time>.tar.gz
+# Rollback: sudo tar --zstd -xpPf /var/backups/glide-migrate-<time>.tar.zst
 # then remove the packages with pacman -Rns glide-desktop and its dependencies.
 set -eu
 
@@ -103,8 +103,16 @@ edited() {
 }
 
 run() {
-    echo "+ $*"
+    echo "  + $*"
     [ "$DRY" -eq 1 ] || "$@"
+}
+
+STEP_STARTED=0
+step() {
+    [ "$STEP_STARTED" -eq 0 ] || echo "  done in $(( $(date +%s) - STEP_STARTED )) s"
+    STEP_STARTED="$(date +%s)"
+    echo
+    echo "[$1/5] $2"
 }
 
 existing() {
@@ -119,20 +127,36 @@ if ! shadowing | existing | grep -q . && [ -x /usr/bin/glide ] && pacman -Qq gli
     exit 0
 fi
 
-echo "== 1. backup"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/var/backups/glide-migrate-$STAMP.tar.gz"
-LIST="$( { shadowing; overwritten; orphaned; edited; } | existing)"
+BACKUP="/var/backups/glide-migrate-$STAMP.tar.zst"
+LIST="$( { shadowing; overwritten; orphaned; edited; echo "$OLD/share/applications/mimeinfo.cache"; } | existing)"
+SIZE="$(printf '%s\n' "$LIST" | xargs -r du -cm 2>/dev/null | tail -n1 | cut -f1)"
+
+echo "This moves Glide from $OLD to the pacman packages:"
+echo "  1. back up $(printf '%s\n' "$LIST" | grep -c .) files (${SIZE:-0} MB) to $BACKUP"
+echo "  2. install glide-desktop and its packages with pacman (downloads several hundred MB)"
+echo "  3. point greetd and the FaceKey PAM lines at /usr/bin"
+echo "  4. delete the old copies under $OLD"
+echo "  5. check that everything the login path needs is in place"
+if [ "$DRY" -eq 0 ] && [ "$YES" -eq 0 ]; then
+    printf 'Continue? [y/N] '
+    read -r answer
+    case "$answer" in y|Y|yes|так|Так) ;; *) echo "Nothing changed."; exit 0 ;; esac
+fi
+
+step 1 "Backing up the files this touches"
 if [ -n "$LIST" ]; then
-    echo "$LIST" | sed 's/^/  /'
+    printf '%s\n' "$LIST" | sed 's/^/  /'
     if [ "$DRY" -eq 0 ]; then
         install -d -m 700 /var/backups
-        echo "$LIST" | tar -czpf "$BACKUP" -P -T -
-        echo "saved $BACKUP"
+        echo "  compressing ${SIZE:-0} MB (each dot is about 10 MB)"
+        printf '%s\n' "$LIST" | tar --zstd -cpPf "$BACKUP" -T - --checkpoint=1000 --checkpoint-action=dot
+        echo
+        echo "  saved $BACKUP ($(du -m "$BACKUP" | cut -f1) MB)"
     fi
 fi
 
-echo "== 2. packages"
+step 2 "Installing the packages (pacman shows its own progress)"
 OVERWRITE=""
 for f in $(overwritten); do
     OVERWRITE="$OVERWRITE --overwrite $f"
@@ -156,7 +180,7 @@ if [ "$DRY" -eq 0 ] && ! [ -x /usr/bin/glide ]; then
     exit 1
 fi
 
-echo "== 3. greetd and PAM"
+step 3 "Pointing greetd and the FaceKey PAM lines at /usr/bin"
 if [ -f /etc/greetd/config.toml ] && grep -q "$OLD/bin/glide --greeter" /etc/greetd/config.toml; then
     run sed -i "s|$OLD/bin/glide --greeter|/usr/bin/glide --greeter|" /etc/greetd/config.toml
 fi
@@ -172,15 +196,27 @@ for pair in polkit:polkit-1 sudo:sudo login:greetd; do
     fi
 done
 
-echo "== 4. old copies"
+step 4 "Deleting the old copies under $OLD"
 for f in $( { shadowing; orphaned; } | existing); do
     run rm -f "$f"
 done
-for d in "$OLD/share/glide/defaults" "$OLD/share/glide/sounds" "$OLD/share/glide"; do
+# The MIME cache of the old launchers still names them as the openers of
+# images, videos and documents; rebuild it, or drop it with the last launcher.
+APPS="$OLD/share/applications"
+if [ -d "$APPS" ]; then
+    if ls "$APPS"/*.desktop >/dev/null 2>&1; then
+        command -v update-desktop-database >/dev/null && run update-desktop-database "$APPS"
+    else
+        for cache in "$APPS"/*.cache; do
+            [ -e "$cache" ] && run rm -f "$cache"
+        done
+    fi
+fi
+for d in "$OLD/share/glide/defaults" "$OLD/share/glide/sounds" "$OLD/share/glide" "$APPS"; do
     [ -d "$d" ] && run rmdir --ignore-fail-on-non-empty "$d"
 done
 
-echo "== 5. checks"
+step 5 "Checking that everything the login path names exists"
 [ "$DRY" -eq 1 ] && { echo "dry run: nothing changed"; exit 0; }
 fail=0
 check() {
@@ -217,6 +253,7 @@ if [ "$fail" -ne 0 ]; then
     echo "Some checks failed. Do not reboot before fixing them; the backup is $BACKUP." >&2
     exit 1
 fi
+echo "  done in $(( $(date +%s) - STEP_STARTED )) s"
 echo
 echo "Done. Log out and back in (or run: systemctl --user daemon-reload) so the session uses /usr/bin."
 echo "Backup: ${BACKUP:-none}"
