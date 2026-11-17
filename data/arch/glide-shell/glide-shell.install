@@ -1,0 +1,28 @@
+_local_build() {
+    if [ -e /usr/local/bin/glide ] || [ -e /usr/local/lib/systemd/user/glide.service ]; then
+        echo ">>> A Glide built from source is still installed under /usr/local and shadows this"
+        echo ">>> package (PATH, the systemd user unit and the settings defaults all look there"
+        echo ">>> first). Remove it with:"
+        echo ">>>   sudo /usr/share/glide-shell/migrate-from-local.sh"
+    fi
+}
+
+_greeter() {
+    if [ -f /etc/greetd/config.toml ] && grep -q '/usr/local/bin/glide --greeter' /etc/greetd/config.toml; then
+        echo ">>> /etc/greetd/config.toml still starts /usr/local/bin/glide; the migration script"
+        echo ">>> points it at /usr/bin/glide."
+    elif ! [ -f /etc/greetd/config.toml ] || ! grep -q 'glide --greeter' /etc/greetd/config.toml; then
+        echo ">>> To log in through Glide's own greeter, copy"
+        echo ">>> /usr/share/doc/glide-shell/greetd-config.toml to /etc/greetd/config.toml"
+        echo ">>> and enable greetd.service."
+    fi
+}
+
+post_install() {
+    _local_build
+    _greeter
+}
+
+post_upgrade() {
+    _local_build
+}

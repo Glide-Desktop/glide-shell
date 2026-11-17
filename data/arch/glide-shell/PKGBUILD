@@ -1,0 +1,128 @@
+pkgbase=glide-shell
+pkgname=(glide-shell glide-configd xdg-desktop-portal-glide glide)
+pkgver=0.1.r0.g0000000
+pkgrel=1
+pkgdesc="Glide desktop shell"
+arch=(x86_64)
+url="https://github.com/Glide-Desktop/glide-shell"
+license=(GPL-3.0-or-later)
+makedepends=(git cargo pkgconf)
+options=(!lto !debug)
+_git="${GLIDE_GIT:-https://github.com/Glide-Desktop}"
+_target="${GLIDE_CARGO_TARGET:-target}"
+source=("$pkgbase::git+$_git/glide-shell.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgbase"
+    printf '0.1.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+    cd "$pkgbase"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgbase"
+    export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR="$_target"
+    cargo build --frozen --release -p glide-compositor -p glidectl -p glide-xembed -p glide-configd -p glide-portal
+}
+
+_exec() {
+    sed "s|^$1=.*|$1=$2|" "$3" > "$4"
+    chmod 644 "$4"
+}
+
+package_glide-shell() {
+    pkgdesc="Glide desktop shell: compositor, top bar, dock, launcher, overview, notifications, lock screen and greeter"
+    depends=(
+        glide-configd
+        xdg-desktop-portal-glide
+        glibc gcc-libs dbus systemd systemd-libs pam
+        mesa libglvnd libdrm libinput libxkbcommon libdisplay-info seatd xkeyboard-config
+        glib2 dconf gsettings-desktop-schemas
+        gstreamer gst-plugins-base gst-plugins-base-libs gst-plugins-good gst-plugins-bad
+        gst-plugins-ugly gst-plugin-pipewire gst-plugin-va
+        pipewire pipewire-audio pipewire-pulse wireplumber libpulse rtkit
+        xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr
+        xwayland-satellite wl-clipboard xdg-utils polkit
+        networkmanager bluez bluez-utils iw upower power-profiles-daemon brightnessctl udisks2
+        greetd
+        sound-theme-freedesktop adwaita-cursors hicolor-icon-theme papirus-icon-theme
+        noto-fonts noto-fonts-emoji
+        adw-gtk-theme qt6ct qt5ct kvantum
+    )
+    optdepends=(
+        'colloid-icon-theme-git: the default icon theme (served by the Glide pacman repository)'
+        'networkmanager-openvpn: importing OpenVPN connections'
+        'noto-fonts-cjk: Chinese, Japanese and Korean text'
+        'netbird: NetBird VPN integration'
+        'intel-media-driver: hardware video encoding for screen mirroring on Intel graphics'
+        'libva-mesa-driver: hardware video encoding for screen mirroring on AMD graphics'
+    )
+    backup=(etc/pam.d/glide-lock)
+    install=glide-shell.install
+
+    cd "$pkgbase"
+    for bin in glide glidectl glide-xembed; do
+        install -Dm755 "$_target/release/$bin" "$pkgdir/usr/bin/$bin"
+    done
+    install -Dm755 data/glide-session "$pkgdir/usr/bin/glide-session"
+    install -Dm755 data/glide-lock "$pkgdir/usr/bin/glide-lock"
+    install -d "$pkgdir/usr/share/wayland-sessions" "$pkgdir/usr/lib/systemd/user"
+    _exec Exec /usr/bin/glide-session data/glide.desktop "$pkgdir/usr/share/wayland-sessions/glide.desktop"
+    _exec ExecStart /usr/bin/glide data/glide.service "$pkgdir/usr/lib/systemd/user/glide.service"
+    install -Dm644 data/glide-shutdown.target "$pkgdir/usr/lib/systemd/user/glide-shutdown.target"
+    install -Dm644 data/pam.d/glide-lock "$pkgdir/etc/pam.d/glide-lock"
+    install -Dm644 data/dbus/org.glide.Shell1.xml "$pkgdir/usr/share/dbus-1/interfaces/org.glide.Shell1.xml"
+    sed 's|command = "glide --greeter"|command = "/usr/bin/glide --greeter"|' data/greetd-glide.toml \
+        > greetd-config.toml
+    install -Dm644 greetd-config.toml "$pkgdir/usr/share/doc/glide-shell/greetd-config.toml"
+    install -Dm755 scripts/migrate-from-local.sh "$pkgdir/usr/share/glide-shell/migrate-from-local.sh"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_glide-configd() {
+    pkgdesc="Glide settings service: SQLite behind org.glide.Config1"
+    depends=(glibc gcc-libs sqlite dbus)
+
+    cd "$pkgbase"
+    install -Dm755 $_target/release/glide-configd "$pkgdir/usr/bin/glide-configd"
+    install -d "$pkgdir/usr/share/dbus-1/services"
+    _exec Exec /usr/bin/glide-configd data/org.glide.Config.service \
+        "$pkgdir/usr/share/dbus-1/services/org.glide.Config.service"
+    install -Dm644 data/dbus/org.glide.Config1.xml "$pkgdir/usr/share/dbus-1/interfaces/org.glide.Config1.xml"
+    for name in shell passwords permissions pins; do
+        install -Dm644 "data/defaults/$name.json" "$pkgdir/usr/share/glide/defaults/$name.json"
+    done
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_xdg-desktop-portal-glide() {
+    pkgdesc="xdg-desktop-portal backend for Glide: file chooser, screenshots and colour picker"
+    depends=(glibc gcc-libs dbus xdg-desktop-portal)
+    optdepends=('glide-files: the file chooser (FileChooser falls back to the GTK portal without it)')
+
+    cd "$pkgbase"
+    install -Dm755 $_target/release/glide-portal "$pkgdir/usr/bin/glide-portal"
+    install -Dm644 data/glide-portals.conf "$pkgdir/usr/share/xdg-desktop-portal/glide-portals.conf"
+    install -Dm644 data/glide.portal "$pkgdir/usr/share/xdg-desktop-portal/portals/glide.portal"
+    install -d "$pkgdir/usr/share/dbus-1/services"
+    _exec Exec /usr/bin/glide-portal data/org.freedesktop.impl.portal.desktop.glide.service \
+        "$pkgdir/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.glide.service"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_glide() {
+    pkgdesc="The Glide desktop: shell, settings service, portal, keychain and every Glide app"
+    arch=(any)
+    depends=(
+        glide-shell glide-configd xdg-desktop-portal-glide
+        glide-keychain glide-facekey
+        glide-settings glide-files glide-terminal glide-text
+        glide-passwords glide-photos glide-folio glide-clips glide-phone
+    )
+    optdepends=('colloid-icon-theme-git: the default icon theme (served by the Glide pacman repository)')
+}
