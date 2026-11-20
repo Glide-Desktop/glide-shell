@@ -83,6 +83,7 @@ pub enum KeyAction {
     ReplyType(char),
     TopbarClosePopup,
     TopbarNav(i32, i32),
+    TopbarTab(i32),
     TopbarActivate,
     QsBack,
     QsField(crate::topbar::FieldKey),
@@ -342,7 +343,7 @@ fn topbar_popup_shortcut(
         return Some(KeyAction::QsBack);
     }
     if matches(Keysym::ISO_Left_Tab) || (matches(Keysym::Tab) && modifiers.shift) {
-        return Some(KeyAction::TopbarNav(0, -1));
+        return Some(KeyAction::TopbarTab(-1));
     }
     if matches(Keysym::Escape) {
         return Some(KeyAction::TopbarClosePopup);
@@ -360,7 +361,7 @@ fn topbar_popup_shortcut(
         return Some(KeyAction::TopbarNav(0, 1));
     }
     if matches(Keysym::Tab) {
-        return Some(KeyAction::TopbarNav(0, 1));
+        return Some(KeyAction::TopbarTab(1));
     }
     if matches(Keysym::Return) || matches(Keysym::KP_Enter) || (plain && matches(Keysym::space)) {
         return Some(KeyAction::TopbarActivate);
@@ -2125,6 +2126,11 @@ impl GlideState {
                     self.run_topbar_action(action);
                     self.queue_redraw();
                 } else if self.topbar.focus_nav(dx, dy) {
+                    self.queue_redraw();
+                }
+            }
+            KeyAction::TopbarTab(step) => {
+                if self.topbar.focus_tab(step) {
                     self.queue_redraw();
                 }
             }

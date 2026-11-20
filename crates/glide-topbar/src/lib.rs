@@ -880,6 +880,7 @@ pub struct Topbar {
     media_rev: u64,
     track_rev: u64,
     status_rev: u64,
+    qs_rev: u64,
     headsets: Vec<crate::headset::Headset>,
     phone: Option<crate::phone::PhoneState>,
     detail_rev: u64,
@@ -1233,7 +1234,7 @@ impl Topbar {
 
     #[must_use]
     pub fn next_wake(&self) -> Option<std::time::Instant> {
-        let mut wake = self.indicators.next_wake();
+        let mut wake = [self.indicators.next_wake(), self.qs_tip.next_wake()].into_iter().flatten().min();
         if let Some(started) = self.recording_started
             && !self.is_animating()
         {
@@ -1559,17 +1560,21 @@ impl Topbar {
                 TopbarAction::QsBrightnessAdjust(pct)
             }
         };
+        self.status_changed(true);
         self.touch();
         Some(action)
     }
 
+    fn status_changed(&mut self, levels_only: bool) {
+        self.status_rev = self.status_rev.wrapping_add(1);
+        if !levels_only {
+            self.qs_rev = self.qs_rev.wrapping_add(1);
+        }
+    }
+
     fn qs_focus_step(&mut self, step: i32) -> bool {
-        let order: Vec<Slot> = self
-            .slots
-            .iter()
-            .map(|(slot, _)| *slot)
-            .filter(|slot| slot.in_quick_settings() && !matches!(slot, Slot::QsPasswordField))
-            .collect();
+        let order: Vec<Slot> =
+            self.slots.iter().map(|(slot, _)| *slot).filter(|slot| slot.in_quick_settings()).collect();
         let Ok(count) = i32::try_from(order.len()) else {
             return false;
         };
@@ -1588,6 +1593,14 @@ impl Topbar {
         }
         self.set_focused(Some(slot));
         true
+    }
+
+    pub fn focus_tab(&mut self, step: i32) -> bool {
+        if self.open_popup == Some(OpenPopup::QuickSettings) {
+            self.qs_focus_step(step.signum())
+        } else {
+            self.focus_nav(step.signum(), 0)
+        }
     }
 
     #[must_use]
@@ -1722,7 +1735,7 @@ impl Topbar {
         }
         self.caffeinated = on;
         self.caffeine_anim.retarget(if on { 1.0 } else { 0.0 }, motion::t2(), E_OVER);
-        self.status_rev = self.status_rev.wrapping_add(1);
+        self.status_changed(false);
     }
 
     pub fn set_recording(&mut self, started: Option<Instant>) {
@@ -1894,7 +1907,7 @@ impl Topbar {
             tiles: self.tile_levels(),
         };
         let battery = self.system_status.battery_pct.map(|_| qs_chip_line(&self.system_status));
-        let revs = (self.status_rev, self.qs_panel.rev, battery.unwrap_or_default());
+        let revs = (self.qs_rev, self.qs_panel.rev, battery.unwrap_or_default());
         (revs, flags, motion, hovered, self.qs_shape(Some(painter)))
     }
 
@@ -1939,7 +1952,7 @@ impl Topbar {
         self.qs_panel.headset_batteries =
             self.headsets.iter().filter_map(|headset| headset.battery.map(|pct| (headset.mac.clone(), pct))).collect();
         self.qs_panel.bump();
-        self.status_rev = self.status_rev.wrapping_add(1);
+        self.status_changed(false);
         self.touch();
     }
 
@@ -1952,7 +1965,7 @@ impl Topbar {
         if gone && self.open_popup == Some(OpenPopup::Phone) {
             self.close_popup();
         }
-        self.status_rev = self.status_rev.wrapping_add(1);
+        self.status_changed(false);
         self.touch();
         true
     }
@@ -1966,7 +1979,7 @@ impl Topbar {
         let pct = pct.max(100);
         if self.volume_max != pct {
             self.volume_max = pct;
-            self.status_rev = self.status_rev.wrapping_add(1);
+            self.status_changed(false);
             self.touch();
         }
     }
@@ -1978,7 +1991,7 @@ impl Topbar {
     pub fn set_night_light_until(&mut self, until: Option<String>) {
         if self.night_light_until != until {
             self.night_light_until = until;
-            self.status_rev = self.status_rev.wrapping_add(1);
+            self.status_changed(false);
             self.touch();
         }
     }
@@ -2057,9 +2070,7 @@ impl Topbar {
         self.slide(|bar| &mut bar.volume_anim, volume);
         self.slide(|bar| &mut bar.mic_anim, mic);
         self.slide(|bar| &mut bar.brightness_anim, brightness);
-        if !levels_only {
-            self.status_rev = self.status_rev.wrapping_add(1);
-        }
+        self.status_changed(levels_only);
         self.sync_indicators();
         self.touch();
         true
@@ -6265,6 +6276,8 @@ mod tests {
         assert_eq!(bar.focused, Some(Slot::QsVolumeMute), "and wraps round");
         assert!(bar.focus_nav(0, -1));
         assert_eq!(bar.focused, Some(Slot::QsPowerMenu));
+        assert!(bar.focus_tab(1));
+        assert_eq!(bar.focused, Some(Slot::QsVolumeMute), "Tab walks the same list");
     }
 
     #[test]
@@ -6292,10 +6305,11 @@ mod tests {
     #[test]
     fn a_slider_adjustment_repaints_quick_settings() {
         let mut bar = quick_settings();
-        let before = bar.status_rev;
+        let before = (bar.status_rev, bar.qs_rev);
         bar.focused = Some(Slot::QsVolumeTrack);
         bar.focus_adjust(5);
-        assert_eq!(bar.status_rev, before, "the card stays, only the slider layer changes");
+        assert_ne!(bar.status_rev, before.0, "the strip's volume icon follows");
+        assert_eq!(bar.qs_rev, before.1, "the card stays, only the slider layer changes");
         assert!(bar.is_animating(), "the slider glides to the new level");
         assert_eq!(bar.system_status().volume_pct, 55);
     }
@@ -6799,9 +6813,11 @@ mod tests {
         let mut bar = topbar_with(&["US"]);
         let status = crate::system_info::SystemStatus { mic_available: true, mic_pct: 30, ..Default::default() };
         bar.set_system_status(status.clone());
-        let before = (bar.detail_rev, bar.status_rev);
+        let before = (bar.detail_rev, bar.qs_rev);
+        let strip = bar.status_rev;
         bar.set_system_status(crate::system_info::SystemStatus { mic_pct: 70, volume_pct: 20, ..status.clone() });
-        assert_eq!((bar.detail_rev, bar.status_rev), before, "sliders are layers, a drag never re-rasters a page");
+        assert_eq!((bar.detail_rev, bar.qs_rev), before, "sliders are layers, a drag never re-rasters a page");
+        assert_ne!(bar.status_rev, strip, "the strip's volume icon still follows a level");
         bar.set_system_status(crate::system_info::SystemStatus {
             mic_pct: 70,
             mic_muted: true,

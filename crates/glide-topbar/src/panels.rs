@@ -1247,14 +1247,14 @@ impl Topbar {
             self.qs_panel.radio_pending = None;
         }
         self.qs_panel.bump();
-        self.status_rev = self.status_rev.wrapping_add(1);
+        self.status_changed(false);
         self.touch();
     }
 
     fn settle_radio(&mut self, radio: Radio) {
         if self.qs_panel.radio_pending(radio) {
             self.qs_panel.radio_pending = None;
-            self.status_rev = self.status_rev.wrapping_add(1);
+            self.status_changed(false);
         }
     }
 
@@ -1545,7 +1545,7 @@ pub(super) fn push_detail<R>(
         .hovered_in(Slot::in_quick_settings)
         .filter(|slot| topbar.qs_panel.view.is_some() && *slot != Slot::QsMicTrack);
     let profile = super::quantize(topbar.profile_anim.value(), super::MOTION_QUANTUM);
-    let revs = (topbar.qs_panel.rev, topbar.detail_rev, topbar.status_rev);
+    let revs = (topbar.qs_panel.rev, topbar.detail_rev, topbar.qs_rev);
     let height = topbar.page_height(Some(painter), detail);
     let shaking = topbar.qs_panel.accordion.shaking();
     let key: DetailKey = (revs, hovered, detail, (height, shaking), profile);
@@ -2938,6 +2938,8 @@ mod tests {
         assert_eq!(bar.action_at(centre(connect)), Some(TopbarAction::QsPanel(PanelAction::PromptSubmit)));
         assert_eq!(bar.action_at(centre(cancel)), Some(TopbarAction::QsPanel(PanelAction::PromptCancel)));
         assert_eq!(bar.qs_key_mode(), QsKeyMode::Typing);
+        assert!(bar.focus_tab(1) && bar.qs_key_mode() == QsKeyMode::Detail, "Tab leaves the field for its buttons");
+        assert!(bar.focus_tab(-1) && bar.qs_key_mode() == QsKeyMode::Typing, "and Shift+Tab comes back to it");
 
         for ch in "pa55".chars() {
             assert!(bar.prompt_key(FieldKey::Type(ch)) == PromptOutcome::Changed);

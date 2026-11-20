@@ -88,4 +88,36 @@ mod tests {
         assert!(coverage(50.0, 28.0, size, radii, 1.0, Some(2.0)) <= 0.0, "a ring leaves the middle empty");
         assert!(coverage(50.0, 1.0, size, radii, 1.0, Some(2.0)) > 0.5, "and covers its edge");
     }
+
+    #[test]
+    fn with_equal_corners_it_paints_what_the_shared_painter_paints() {
+        use glide_shell::raster::Canvas;
+        let (w, h, scale, radius) = (40, 24, 2, 8.0);
+        let colour = Color([0.1, 0.4, 0.95, 0.6]);
+        let pixel = |buf: &[u8], x: i32, y: i32| {
+            let at = usize::try_from((y * w * scale + x) * 4).expect("index");
+            buf[at..at + 4].to_vec()
+        };
+        let close = |a: &[u8], b: &[u8], slack: u8| a.iter().zip(b).all(|(p, q)| p.abs_diff(*q) <= slack);
+        let probes = [(40, 24, 2), (40, 1, 2), (40, 2, 2), (40, 4, 2), (1, 24, 2), (79, 24, 2), (0, 0, 2), (79, 47, 2)];
+        let curve = [(4, 4, 12), (2, 2, 12), (6, 3, 12), (75, 43, 12)];
+
+        let compare = |name: &str, own: &Canvas<'_>, shared: &Canvas<'_>| {
+            for (x, y, slack) in probes.into_iter().chain(curve) {
+                let (mine, theirs) = (pixel(&own.buf, x, y), pixel(&shared.buf, x, y));
+                assert!(close(&mine, &theirs, slack), "{name} differs at {x},{y}: {mine:?} vs {theirs:?}");
+            }
+        };
+        let mut shared = Canvas::new(w, h, scale).expect("canvas");
+        shared.fill(shared.full(), colour, radius);
+        let mut own = Canvas::new(w, h, scale).expect("canvas");
+        paint(&mut own.buf, (w, h, scale), [radius; 4], colour, None);
+        compare("fill", &own, &shared);
+
+        let mut shared = Canvas::new(w, h, scale).expect("canvas");
+        shared.stroke(shared.full(), 2.0, radius, colour);
+        let mut own = Canvas::new(w, h, scale).expect("canvas");
+        paint(&mut own.buf, (w, h, scale), [radius; 4], colour, Some(2.0));
+        compare("ring", &own, &shared);
+    }
 }

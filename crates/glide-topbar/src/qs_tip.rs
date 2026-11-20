@@ -91,9 +91,16 @@ impl QsTip {
     }
 
     pub(super) fn is_animating(&self) -> bool {
-        let waiting =
-            matches!(self.wait, Wait::Since(at) if glide_ui::clock::since(at) < glide_theme::component::TOOLTIP_DELAY);
-        (waiting && self.hover.is_some()) || self.reveal.is_animating(motion::t1())
+        self.reveal.is_animating(motion::t1())
+    }
+
+    pub(super) fn next_wake(&self) -> Option<Instant> {
+        match (self.hover, self.wait) {
+            (Some(slot), Wait::Since(at)) if self.shown != Some(slot) => {
+                Some(at + glide_theme::component::TOOLTIP_DELAY)
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn clear(&mut self) {
@@ -179,13 +186,14 @@ mod tests {
         tip.hover(Some(Slot::QsLock));
         tip.settle();
         assert_eq!(tip.shown, None, "not before the delay");
-        assert!(tip.is_animating(), "the frame pump waits for the delay");
-        let Some(earlier) = glide_ui::clock::now().checked_sub(glide_theme::component::TOOLTIP_DELAY) else {
-            return;
-        };
+        assert!(!tip.is_animating(), "the dwell pumps no frames");
+        let Wait::Since(started) = tip.wait else { panic!("the dwell is timed") };
+        assert_eq!(tip.next_wake(), Some(started + glide_theme::component::TOOLTIP_DELAY), "a timer wakes it");
+        let earlier = glide_ui::clock::now().checked_sub(glide_theme::component::TOOLTIP_DELAY).expect("uptime");
         tip.wait = Wait::Since(earlier);
         tip.settle();
         assert_eq!(tip.shown, Some(Slot::QsLock));
+        assert_eq!(tip.next_wake(), None, "a shown tip needs no wake");
         assert_eq!(text(Slot::QsLock), Some((Key::QsTipLock, Some("Super+L"))));
         assert_eq!(text(Slot::QsScreenshot).and_then(|(_, keycap)| keycap), Some("Print"));
         let painter = crate::paint::Painter::new(14.0, None);
