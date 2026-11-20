@@ -1541,7 +1541,9 @@ pub(super) fn push_detail<R>(
     if slide <= 0.0 {
         return;
     }
-    let hovered = topbar.hovered_in(Slot::in_quick_settings).filter(|_| topbar.qs_panel.view.is_some());
+    let hovered = topbar
+        .hovered_in(Slot::in_quick_settings)
+        .filter(|slot| topbar.qs_panel.view.is_some() && *slot != Slot::QsMicTrack);
     let profile = super::quantize(topbar.profile_anim.value(), super::MOTION_QUANTUM);
     let revs = (topbar.qs_panel.rev, topbar.detail_rev, topbar.status_rev);
     let height = topbar.page_height(Some(painter), detail);
@@ -1578,6 +1580,10 @@ pub(super) fn push_detail<R>(
         items.iter().find(|item| item.kind == ItemKind::Meter).filter(|item| clip.contains(item.rect.loc))
     {
         super::push_mic_meter(topbar, renderer, (rect, meter.rect, 0, reveal), (scale, output_scale), elements);
+    }
+    if let Some(row) = items.iter().find(|item| item.kind == ItemKind::MicSlider && item.slot.is_none()) {
+        let at = (rect, row.rect, clip, reveal);
+        super::push_page_mic_slider(topbar, renderer, painter, at, (scale, output_scale), elements);
     }
     if topbar.qs_panel.spinning() {
         let marks = motion_marks(&topbar.qs_panel, &items, painter);
@@ -2409,12 +2415,24 @@ fn draw_mic_slider(
     c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, status: &crate::system_info::SystemStatus,
 ) {
     let row = super::qs_slider_row(rect.loc.x, rect.loc.y, rect.size.w, true);
-    let (muted, pct) = (status.mic_muted, status.mic_pct);
-    let colour = super::draw_qs_mute_button(c, ctx.theme, row.icon, muted);
-    super::draw_qs_mic_glyph(c, row.icon, (muted, colour));
-    super::draw_qs_readout(c, ctx, row.readout, Some((pct, muted)));
-    let thumb = super::QsThumb::of(Slot::QsMicTrack, ctx.hovered, None);
-    super::draw_qs_track(c, ctx.theme, row.track, super::QsTrack { thumb, ..super::QsTrack::new(pct, muted, true) });
+    let colour = super::draw_qs_mute_button(c, ctx.theme, row.icon, status.mic_muted);
+    super::draw_qs_mic_glyph(c, row.icon, (status.mic_muted, colour));
+}
+
+#[cfg(test)]
+pub(super) fn draw_layered_sliders(
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, (panel, detail, height): (&DetailPanel, Detail, i32),
+    status: &crate::system_info::SystemStatus,
+) {
+    let body = detail_geometry(height, has_radio(detail), has_link(detail)).body;
+    for item in detail_items(panel, detail, status, body, Some(ctx.painter)) {
+        if item.kind == ItemKind::MicSlider && item.slot.is_none() {
+            let row = super::qs_slider_row(item.rect.loc.x, item.rect.loc.y, item.rect.size.w, true);
+            super::draw_qs_readout(c, ctx, row.readout, Some((status.mic_pct, status.mic_muted)));
+            let track = super::QsTrack::new(status.mic_pct, status.mic_muted, true);
+            super::draw_qs_track(c, ctx.theme, row.track, track);
+        }
+    }
 }
 
 const fn vpn_kind_key(kind: VpnKind) -> Key {

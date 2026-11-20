@@ -50,6 +50,7 @@ pub use island::{ALERT_HOLD, IslandAlert};
 
 mod status;
 
+mod corners;
 mod face_tip;
 mod qs_tip;
 mod tray;
@@ -606,6 +607,16 @@ impl Slot {
             && !self.in_headset_popup()
             && !self.in_phone_popup()
             && !self.in_passwords_popup()
+    }
+
+    const fn split_half(self) -> Option<corners::Split> {
+        match self {
+            Self::QsWifi | Self::QsBluetooth | Self::QsNetbird | Self::QsSaver => Some(corners::Split::Body),
+            Self::QsWifiMore | Self::QsBluetoothMore | Self::QsNetbirdMore | Self::QsSaverMore => {
+                Some(corners::Split::Chevron)
+            }
+            _ => None,
+        }
     }
 
     const fn state_layer_radius(self) -> Option<f32> {
@@ -1548,7 +1559,6 @@ impl Topbar {
                 TopbarAction::QsBrightnessAdjust(pct)
             }
         };
-        self.status_rev = self.status_rev.wrapping_add(1);
         self.touch();
         Some(action)
     }
@@ -2030,15 +2040,26 @@ impl Topbar {
             (None, Some(after)) => self.profile_anim.jump(profile_index(after)),
             _ => {}
         }
+        let levels_only = status
+            == crate::system_info::SystemStatus {
+                volume_pct: volume,
+                mic_pct: mic,
+                brightness_pct: brightness,
+                ..self.system_status.clone()
+            };
         self.system_status = status;
-        self.detail_rev = self.detail_rev.wrapping_add(1);
+        if !levels_only {
+            self.detail_rev = self.detail_rev.wrapping_add(1);
+        }
         if !at_a_glance {
             return self.open_popup.is_some();
         }
         self.slide(|bar| &mut bar.volume_anim, volume);
         self.slide(|bar| &mut bar.mic_anim, mic);
         self.slide(|bar| &mut bar.brightness_anim, brightness);
-        self.status_rev = self.status_rev.wrapping_add(1);
+        if !levels_only {
+            self.status_rev = self.status_rev.wrapping_add(1);
+        }
         self.sync_indicators();
         self.touch();
         true
@@ -2789,12 +2810,20 @@ fn focus_ring_bounds(rect: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
 }
 
 fn draw_layer(
-    layer: Layer, size: Size<i32, Logical>, radius: f32, theme: &TopbarTheme, scale: i32,
+    layer: Layer, size: Size<i32, Logical>, (radius, split): (f32, Option<corners::Split>), theme: &TopbarTheme,
+    scale: i32,
 ) -> Option<MemoryRenderBuffer> {
     let mut c = Canvas::new(size.w, size.h, scale)?;
-    match layer {
-        Layer::Focus => c.stroke(c.full(), FOCUS_RING_STROKE, radius, layer.colour(theme)),
-        Layer::Hover | Layer::Press => c.fill(c.full(), layer.colour(theme), radius),
+    match (layer, split) {
+        (Layer::Focus, Some(split)) => {
+            let radii = split.radii(radius, R1 + FOCUS_RING_STROKE);
+            corners::paint(&mut c.buf, (size.w, size.h, scale), radii, layer.colour(theme), Some(FOCUS_RING_STROKE));
+        }
+        (Layer::Hover | Layer::Press, Some(split)) => {
+            corners::paint(&mut c.buf, (size.w, size.h, scale), split.radii(radius, R1), layer.colour(theme), None);
+        }
+        (Layer::Focus, None) => c.stroke(c.full(), FOCUS_RING_STROKE, radius, layer.colour(theme)),
+        (Layer::Hover | Layer::Press, None) => c.fill(c.full(), layer.colour(theme), radius),
     }
     Some(c.finish())
 }
@@ -2804,17 +2833,19 @@ struct LayerJob {
     layer: Layer,
     rect: Rectangle<i32, Logical>,
     radius: f32,
+    split: Option<corners::Split>,
     alpha: f32,
     in_popup: bool,
 }
 
 impl Topbar {
     fn layer_buffer(
-        &mut self, layer: Layer, size: Size<i32, Logical>, radius: f32, scale: i32,
+        &mut self, layer: Layer, size: Size<i32, Logical>, (radius, split): (f32, Option<corners::Split>), scale: i32,
     ) -> Option<&MemoryRenderBuffer> {
-        let key = (layer.tag(), size.w, size.h, radius.to_bits(), scale);
+        let tag = layer.tag() | split.map_or(0, corners::Split::tag) << 2;
+        let key = (tag, size.w, size.h, radius.to_bits(), scale);
         if let std::collections::hash_map::Entry::Vacant(entry) = self.layers.entry(key) {
-            entry.insert(draw_layer(layer, size, radius, &self.theme, scale)?);
+            entry.insert(draw_layer(layer, size, (radius, split), &self.theme, scale)?);
         }
         self.layers.get(&key)
     }
@@ -2844,7 +2875,8 @@ impl Topbar {
                 let (Some(radius), Some(rect)) = (slot.state_layer_radius(), self.drawn_slot_rect(*slot)) else {
                     continue;
                 };
-                jobs.push(LayerJob { layer, rect, radius, alpha, in_popup: !slot.in_strip() });
+                let split = slot.split_half();
+                jobs.push(LayerJob { layer, rect, radius, split, alpha, in_popup: !slot.in_strip() });
             }
         }
         let focus = self.focus_anim.value().clamp(0.0, 1.0) as f32;
@@ -2855,6 +2887,7 @@ impl Topbar {
                 layer: Layer::Focus,
                 rect: focus_ring_bounds(rect),
                 radius: glide_theme::shape::R2 + FOCUS_RING_STROKE,
+                split: self.focused.and_then(Slot::split_half),
                 alpha: focus,
                 in_popup: true,
             });
@@ -2877,7 +2910,7 @@ fn push_state_layers<R: ShellRenderer>(topbar: &mut Topbar, frame: &mut Frame<'_
             (true, None, _) => continue,
             (false, _, _) => Placed { popup: job.rect, element: job.rect, progress: 1.0, alpha: job.alpha },
         };
-        let Some(buffer) = topbar.layer_buffer(job.layer, job.rect.size, job.radius, output_scale) else {
+        let Some(buffer) = topbar.layer_buffer(job.layer, job.rect.size, (job.radius, job.split), output_scale) else {
             continue;
         };
         push_placed(renderer, buffer, placed, scale, elements);
@@ -4507,45 +4540,78 @@ fn qs_slider_layers(
         rows.push((SliderKind::Brightness, Slot::QsBrightnessTrack, row, QsTrack::new(live.brightness, false, true)));
     }
 
-    let theme = &topbar.theme;
-    let mut out = Vec::with_capacity(rows.len());
-    for (kind, slot, row, track) in rows {
-        let track = QsTrack { thumb: QsThumb::of(slot, hovered, dragging), ..track };
-        let union = row.readout.merge(row.track);
-        let bounds = local_rect(
-            union.loc.x - SLIDER_HALO,
-            union.loc.y - SLIDER_HALO,
-            union.size.w + SLIDER_HALO * 2,
-            union.size.h + SLIDER_HALO * 2,
-        );
-        let key: SliderKey = (
-            (kind, track.max),
-            track.pct,
-            track.muted,
-            track.enabled,
-            track.thumb,
-            scale,
-            crate::paint::painter_generation(),
-        );
-        if !topbar.qs_sliders.contains_key(&key) {
-            if topbar.qs_sliders.len() >= SLIDER_LAYERS {
-                topbar.qs_sliders.clear();
-            }
-            let Some(mut c) = Canvas::new(bounds.size.w, bounds.size.h, scale) else {
-                continue;
-            };
-            let shift = |rect: LocalRect| Rectangle::new(rect.loc - bounds.loc, rect.size);
-            let ctx = QsRenderContext { painter, theme, hovered };
-            let readout = track.enabled.then_some((track.pct, track.muted));
-            draw_qs_readout(&mut c, &ctx, shift(row.readout), readout);
-            draw_qs_track(&mut c, theme, shift(row.track), track);
-            topbar.qs_sliders.insert(key, c.finish());
+    rows.into_iter()
+        .filter_map(|(kind, slot, row, track)| {
+            let track = QsTrack { thumb: QsThumb::of(slot, hovered, dragging), ..track };
+            qs_slider_layer(topbar, painter, (kind, row, track), scale)
+        })
+        .collect()
+}
+
+fn qs_slider_layer(
+    topbar: &mut Topbar, painter: &crate::paint::Painter, (kind, row, track): (SliderKind, QsSliderRow, QsTrack),
+    scale: i32,
+) -> Option<(MemoryRenderBuffer, LocalRect)> {
+    let union = row.readout.merge(row.track);
+    let bounds = local_rect(
+        union.loc.x - SLIDER_HALO,
+        union.loc.y - SLIDER_HALO,
+        union.size.w + SLIDER_HALO * 2,
+        union.size.h + SLIDER_HALO * 2,
+    );
+    let key: SliderKey = (
+        (kind, track.max),
+        track.pct,
+        track.muted,
+        track.enabled,
+        track.thumb,
+        scale,
+        crate::paint::painter_generation(),
+    );
+    if !topbar.qs_sliders.contains_key(&key) {
+        if topbar.qs_sliders.len() >= SLIDER_LAYERS {
+            topbar.qs_sliders.clear();
         }
-        if let Some(buffer) = topbar.qs_sliders.get(&key) {
-            out.push((buffer.clone(), bounds));
-        }
+        let mut c = Canvas::new(bounds.size.w, bounds.size.h, scale)?;
+        let shift = |rect: LocalRect| Rectangle::new(rect.loc - bounds.loc, rect.size);
+        let ctx = QsRenderContext { painter, theme: &topbar.theme, hovered: None };
+        let readout = track.enabled.then_some((track.pct, track.muted));
+        draw_qs_readout(&mut c, &ctx, shift(row.readout), readout);
+        draw_qs_track(&mut c, &topbar.theme, shift(row.track), track);
+        topbar.qs_sliders.insert(key, c.finish());
     }
-    out
+    topbar.qs_sliders.get(&key).map(|buffer| (buffer.clone(), bounds))
+}
+
+fn push_page_mic_slider<R: ShellRenderer>(
+    topbar: &mut Topbar, renderer: &mut R, painter: &crate::paint::Painter,
+    (rect, row, clip, reveal): (Rectangle<i32, Logical>, LocalRect, LocalRect, f64),
+    (scale, output_scale): (Scale<f64>, i32), elements: &mut Vec<MemoryRenderBufferRenderElement<R>>,
+) {
+    let row = qs_slider_row(row.loc.x, row.loc.y, row.size.w, true);
+    let hovered = topbar.hovered_in(Slot::in_quick_settings);
+    let dragging = topbar.pressed.filter(|slot| topbar.slider_dragging && slot.is_slider());
+    let status = &topbar.system_status;
+    let track = QsTrack {
+        thumb: QsThumb::of(Slot::QsMicTrack, hovered, dragging),
+        ..QsTrack::new(percent(topbar.mic_anim.value()), status.mic_muted, true)
+    };
+    let Some((buffer, bounds)) = qs_slider_layer(topbar, painter, (SliderKind::Mic, row, track), output_scale) else {
+        return;
+    };
+    let Some(visible) = bounds.intersection(clip) else {
+        return;
+    };
+    let element = Rectangle::new(rect.loc + visible.loc, visible.size);
+    let origin = Some(visible.loc - bounds.loc);
+    push_placed_from(
+        renderer,
+        &buffer,
+        Placed { popup: rect, element, progress: reveal, alpha: 1.0 },
+        origin,
+        scale,
+        elements,
+    );
 }
 
 fn initial(name: &str) -> String {
@@ -6229,7 +6295,8 @@ mod tests {
         let before = bar.status_rev;
         bar.focused = Some(Slot::QsVolumeTrack);
         bar.focus_adjust(5);
-        assert_ne!(bar.status_rev, before);
+        assert_eq!(bar.status_rev, before, "the card stays, only the slider layer changes");
+        assert!(bar.is_animating(), "the slider glides to the new level");
         assert_eq!(bar.system_status().volume_pct, 55);
     }
 
@@ -6376,7 +6443,7 @@ mod tests {
     fn system_status_and_layout_changes_advance_revision_counters() {
         let mut bar = Topbar::new(TopbarTheme::default());
         let s_rev0 = bar.status_rev;
-        let status = crate::system_info::SystemStatus { volume_pct: 75, ..Default::default() };
+        let status = crate::system_info::SystemStatus { wifi_enabled: true, ..Default::default() };
         assert!(bar.set_system_status(status));
         assert_eq!(bar.status_rev, s_rev0.wrapping_add(1));
 
@@ -6535,15 +6602,19 @@ mod tests {
     fn state_layer_buffers_are_keyed_by_kind_size_radius_and_scale() {
         let mut bar = topbar_with(&["US", "UA"]);
         let size = Size::from((40, 24));
-        assert!(bar.layer_buffer(Layer::Hover, size, glide_theme::shape::R2, 1).is_some());
+        let (r1, r2) = ((glide_theme::shape::R1, None), (glide_theme::shape::R2, None));
+        assert!(bar.layer_buffer(Layer::Hover, size, r2, 1).is_some());
         assert_eq!(bar.layers.len(), 1);
-        let _ = bar.layer_buffer(Layer::Hover, size, glide_theme::shape::R2, 1);
+        let _ = bar.layer_buffer(Layer::Hover, size, r2, 1);
         assert_eq!(bar.layers.len(), 1);
-        let _ = bar.layer_buffer(Layer::Press, size, glide_theme::shape::R2, 1);
-        let _ = bar.layer_buffer(Layer::Hover, size, glide_theme::shape::R1, 1);
-        let _ = bar.layer_buffer(Layer::Hover, size, glide_theme::shape::R2, 2);
-        let _ = bar.layer_buffer(Layer::Focus, size, glide_theme::shape::R2, 1);
+        let _ = bar.layer_buffer(Layer::Press, size, r2, 1);
+        let _ = bar.layer_buffer(Layer::Hover, size, r1, 1);
+        let _ = bar.layer_buffer(Layer::Hover, size, r2, 2);
+        let _ = bar.layer_buffer(Layer::Focus, size, r2, 1);
         assert_eq!(bar.layers.len(), 5);
+        let _ = bar.layer_buffer(Layer::Hover, size, (glide_theme::shape::R2, Some(corners::Split::Body)), 1);
+        let _ = bar.layer_buffer(Layer::Hover, size, (glide_theme::shape::R2, Some(corners::Split::Chevron)), 1);
+        assert_eq!(bar.layers.len(), 7, "each half of a split tile has its own corners");
         bar.reconfigure(TopbarTheme { dark: false, ..TopbarTheme::default() });
         assert!(bar.layers.is_empty(), "a theme change drops every layer");
     }
@@ -6721,6 +6792,23 @@ mod tests {
         bar.set_system_status(status);
         assert!(bar.profile_anim.is_animating());
         assert!((bar.profile_anim.target() - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_level_change_alone_keeps_the_page_raster() {
+        let mut bar = topbar_with(&["US"]);
+        let status = crate::system_info::SystemStatus { mic_available: true, mic_pct: 30, ..Default::default() };
+        bar.set_system_status(status.clone());
+        let before = (bar.detail_rev, bar.status_rev);
+        bar.set_system_status(crate::system_info::SystemStatus { mic_pct: 70, volume_pct: 20, ..status.clone() });
+        assert_eq!((bar.detail_rev, bar.status_rev), before, "sliders are layers, a drag never re-rasters a page");
+        bar.set_system_status(crate::system_info::SystemStatus {
+            mic_pct: 70,
+            mic_muted: true,
+            volume_pct: 20,
+            ..status
+        });
+        assert_ne!(bar.detail_rev, before.0, "the mute button is part of the page");
     }
 
     #[test]
@@ -7019,6 +7107,7 @@ mod tests {
                         .with_icons(Some(&mut icons));
                     let status = bar.system_status().clone();
                     panels::draw_detail(&mut canvas, &ctx, &bar.qs_panel, page, &status, 1.0);
+                    panels::draw_layered_sliders(&mut canvas, &ctx, (&bar.qs_panel, page, height), &status);
                     save(&canvas, format!("qs-page-{page:?}{variant}-{appearance:?}.png"));
                     bar.close_detail();
                 }
