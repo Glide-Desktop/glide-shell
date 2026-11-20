@@ -1553,12 +1553,63 @@ impl Topbar {
         Some(action)
     }
 
+    fn qs_focus_step(&mut self, step: i32) -> bool {
+        let order: Vec<Slot> = self
+            .slots
+            .iter()
+            .map(|(slot, _)| *slot)
+            .filter(|slot| slot.in_quick_settings() && !matches!(slot, Slot::QsPasswordField))
+            .collect();
+        let Ok(count) = i32::try_from(order.len()) else {
+            return false;
+        };
+        if count == 0 {
+            return false;
+        }
+        let current = self.focused.and_then(|focused| order.iter().position(|slot| *slot == focused));
+        let next = match current.and_then(|index| i32::try_from(index).ok()) {
+            Some(index) => (index + step).rem_euclid(count),
+            None if step > 0 => 0,
+            None => count - 1,
+        };
+        let slot = order[usize::try_from(next).unwrap_or(0)];
+        if self.focused == Some(slot) {
+            return false;
+        }
+        self.set_focused(Some(slot));
+        true
+    }
+
+    #[must_use]
+    pub fn qs_arrow_action(&self, dx: i32) -> Option<TopbarAction> {
+        if self.open_popup != Some(OpenPopup::QuickSettings) || dx == 0 {
+            return None;
+        }
+        let focused = self.focused?;
+        if let Slot::QsProfile(profile) = focused {
+            let index = QS_PROFILES.iter().position(|candidate| *candidate == profile)?;
+            let next = index.checked_add_signed(isize::try_from(dx.signum()).ok()?)?;
+            return QS_PROFILES.get(next).map(|profile| TopbarAction::QsSetPowerProfile(*profile));
+        }
+        if focused.is_slider() {
+            return None;
+        }
+        if self.qs_panel.view.is_some() {
+            return (dx < 0).then_some(TopbarAction::QsPanel(PanelAction::Back));
+        }
+        let more = QS_TILES.into_iter().find(|tile| tile.slot() == focused).and_then(QsTile::more)?;
+        (dx > 0).then(|| self.resolve(more))
+    }
+
     pub fn focus_nav(&mut self, dx: i32, dy: i32) -> bool {
         if dx == 0 && dy == 0 {
             return false;
         }
         if self.open_popup == Some(OpenPopup::AppMenu) {
             return self.app_menu_nav(dx, dy);
+        }
+        if self.open_popup == Some(OpenPopup::QuickSettings) {
+            return self.qs_focus_step(if dy == 0 { dx.signum() } else { dy.signum() });
         }
         if dx != 0 && self.focused == Some(Slot::CalMonth) && self.open_popup == Some(OpenPopup::NotificationCenter) {
             return self.shift_calendar(dx.signum());
@@ -6074,27 +6125,29 @@ mod tests {
         assert!(!bar.focus_nav(0, 0), "a zero step never moves focus");
         assert!(!bar.has_focus());
         assert_eq!(bar.focused_action(), None);
-        for (dx, dy, slot, action) in [
-            (0, 1, Slot::QsVolumeMute, Some(TopbarAction::QsVolumeMute)),
-            (1, 0, Slot::QsVolumeTrack, None),
-            (1, 0, Slot::QsVolumeMore, Some(TopbarAction::QsPanel(PanelAction::Open(Detail::Sound)))),
-            (0, 1, Slot::QsBluetoothMore, Some(TopbarAction::QsPanel(PanelAction::Open(Detail::Bluetooth)))),
-            (-1, 0, Slot::QsBluetooth, Some(TopbarAction::QsToggleBluetooth)),
-            (-1, 0, Slot::QsWifiMore, Some(TopbarAction::QsPanel(PanelAction::Open(Detail::Wifi)))),
-            (-1, 0, Slot::QsWifi, Some(TopbarAction::QsToggleWifi)),
+        for (slot, action) in [
+            (Slot::QsVolumeMute, Some(TopbarAction::QsVolumeMute)),
+            (Slot::QsVolumeTrack, None),
+            (Slot::QsVolumeMore, Some(TopbarAction::QsPanel(PanelAction::Open(Detail::Sound)))),
+            (Slot::QsBrightnessTrack, None),
+            (Slot::QsWifi, Some(TopbarAction::QsToggleWifi)),
+            (Slot::QsWifiMore, Some(TopbarAction::QsPanel(PanelAction::Open(Detail::Wifi)))),
+            (Slot::QsBluetooth, Some(TopbarAction::QsToggleBluetooth)),
         ] {
-            assert!(bar.focus_nav(dx, dy));
+            assert!(bar.focus_nav(0, 1));
             assert_eq!(bar.focused, Some(slot));
             if let Some(action) = action {
                 assert_eq!(bar.focused_action(), Some(action));
             }
         }
-        assert!(!bar.focus_nav(-1, 0), "nothing lies left of the first tile");
-        assert!(bar.focus_nav(0, 1));
-        assert_eq!(bar.focused, Some(Slot::QsDnd));
-        assert!(bar.focus_nav(1, 0));
-        assert_eq!(bar.focused, Some(Slot::QsNightLight));
-        assert!(!bar.focus_nav(1, 0), "the grid has two columns");
+        assert_eq!(
+            bar.qs_arrow_action(1),
+            Some(TopbarAction::QsPanel(PanelAction::Open(Detail::Bluetooth))),
+            "Right on a tile with a page opens it"
+        );
+        assert_eq!(bar.qs_arrow_action(-1), None);
+        assert!(bar.focus_nav(-1, 0), "elsewhere Left steps back through the list");
+        assert_eq!(bar.focused, Some(Slot::QsWifiMore));
         assert!(bar.close_popup());
         assert!(!bar.has_focus() && bar.focused_action().is_none());
 
@@ -6133,25 +6186,19 @@ mod tests {
     #[test]
     fn arrows_reach_every_row_of_quick_settings_from_top_to_bottom() {
         let mut bar = quick_settings();
-        bar.set_focused(Some(Slot::QsVolumeMore));
-        let mut visited = vec![Slot::QsVolumeMore];
-        while bar.focus_nav(0, 1) {
+        let order: Vec<Slot> =
+            bar.slots.iter().map(|(slot, _)| *slot).filter(|slot| slot.in_quick_settings()).collect();
+        let mut visited = Vec::new();
+        for _ in 0..order.len() {
+            assert!(bar.focus_nav(0, 1));
             visited.push(bar.focused.expect("focus"));
         }
-        assert_eq!(
-            visited,
-            [Slot::QsVolumeMore, Slot::QsBluetoothMore, Slot::QsNightLight, Slot::QsCaffeine, Slot::QsSettings]
-        );
-        let mut sideways = Vec::new();
-        while bar.focus_nav(-1, 0) {
-            sideways.push(bar.focused.expect("focus"));
-        }
-        while bar.focus_nav(1, 0) {
-            sideways.push(bar.focused.expect("focus"));
-        }
-        assert_eq!(sideways, [Slot::QsScreenshot, Slot::QsSettings, Slot::QsLock, Slot::QsPowerMenu]);
+        assert_eq!(visited, order, "Down walks the controls in the order they are drawn");
+        assert_eq!(visited.last(), Some(&Slot::QsPowerMenu));
+        assert!(bar.focus_nav(0, 1));
+        assert_eq!(bar.focused, Some(Slot::QsVolumeMute), "and wraps round");
         assert!(bar.focus_nav(0, -1));
-        assert_eq!(bar.focused, Some(Slot::QsCaffeine));
+        assert_eq!(bar.focused, Some(Slot::QsPowerMenu));
     }
 
     #[test]
@@ -6701,9 +6748,9 @@ mod tests {
         bar.set_focused(Some(Slot::QsMicTrack));
         assert_eq!(bar.focus_adjust(-5), Some(TopbarAction::QsMicAdjust(25)));
         assert_eq!(bar.system_status().mic_pct, 25);
-        bar.set_focused(Some(Slot::QsVolumeTrack));
+        bar.set_focused(Some(Slot::QsVolumeMore));
         assert!(bar.focus_nav(0, 1));
-        assert_eq!(bar.focused, Some(Slot::QsMicTrack));
+        assert_eq!(bar.focused, Some(Slot::QsMicMute), "the microphone row follows the volume row");
         assert!(Slot::QsMicTrack.is_slider() && !Slot::QsMicMute.is_slider());
     }
 

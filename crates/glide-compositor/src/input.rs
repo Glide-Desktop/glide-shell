@@ -338,14 +338,11 @@ fn topbar_popup_shortcut(
             return Some(KeyAction::QsField(key));
         }
     }
-    if qs_mode != QsKeyMode::Normal {
-        if matches(Keysym::Escape) || matches(Keysym::Left) {
-            return Some(KeyAction::QsBack);
-        }
-        if matches(Keysym::ISO_Left_Tab) || matches(Keysym::Tab) {
-            let step = if modifiers.shift { -1 } else { 1 };
-            return Some(KeyAction::TopbarNav(0, step));
-        }
+    if qs_mode != QsKeyMode::Normal && matches(Keysym::BackSpace) {
+        return Some(KeyAction::QsBack);
+    }
+    if matches(Keysym::ISO_Left_Tab) || (matches(Keysym::Tab) && modifiers.shift) {
+        return Some(KeyAction::TopbarNav(0, -1));
     }
     if matches(Keysym::Escape) {
         return Some(KeyAction::TopbarClosePopup);
@@ -363,8 +360,7 @@ fn topbar_popup_shortcut(
         return Some(KeyAction::TopbarNav(0, 1));
     }
     if matches(Keysym::Tab) {
-        let step = if modifiers.shift { -1 } else { 1 };
-        return Some(KeyAction::TopbarNav(step, 0));
+        return Some(KeyAction::TopbarNav(0, 1));
     }
     if matches(Keysym::Return) || matches(Keysym::KP_Enter) || (plain && matches(Keysym::space)) {
         return Some(KeyAction::TopbarActivate);
@@ -2112,6 +2108,13 @@ impl GlideState {
                 }
             }
             KeyAction::TopbarNav(dx, dy) => {
+                if dy == 0
+                    && let Some(action) = self.topbar.qs_arrow_action(dx)
+                {
+                    self.run_topbar_action(action);
+                    self.queue_redraw();
+                    return;
+                }
                 let adjusted = if dx != 0 && self.topbar.has_focus() {
                     let delta = i8::try_from(dx * 5).unwrap_or(0);
                     self.topbar.focus_adjust(delta)

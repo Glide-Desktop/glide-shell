@@ -2826,13 +2826,16 @@ mod tests {
         let mut bar = open_wifi();
         bar.set_focused(Some(Slot::QsBack));
         let mut visited = vec![Slot::QsBack];
-        while bar.focus_nav(0, 1) {
+        for _ in 0..7 {
+            assert!(bar.focus_nav(0, 1));
             visited.push(bar.focused.expect("focus"));
         }
         assert_eq!(
             visited,
             [
                 Slot::QsBack,
+                Slot::QsDetailToggle,
+                Slot::QsRescan,
                 Slot::QsDetailRow(0),
                 Slot::QsDetailRow(1),
                 Slot::QsDetailRow(2),
@@ -2840,6 +2843,7 @@ mod tests {
                 Slot::QsDetailSettings,
             ]
         );
+        assert_eq!(bar.qs_arrow_action(-1), Some(TopbarAction::QsPanel(PanelAction::Back)), "Left goes back");
     }
 
     #[test]
