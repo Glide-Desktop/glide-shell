@@ -6,7 +6,9 @@ use super::{
 
 use crate::i18n::{Key, t};
 use crate::power::{PowerAction, is_destructive};
-use crate::qs_net::{AudioOutput, BtDevice, ConnectError, NetEvent, Security, VpnConnection, VpnKind, WifiNetwork};
+use crate::qs_net::{
+    AudioOutput, BtDevice, ConnectError, NetEvent, Security, VpnConnection, VpnKind, WifiInfo, WifiNetwork,
+};
 use crate::system_info::{BatteryInfo, BatteryState, PowerProfile};
 use glide_shell::field::{CaretMove, TextField};
 use glide_theme::shape::{R_ROUND, R1, R2, R3};
@@ -54,12 +56,11 @@ const EMPTY_PAD_BOTTOM: i32 = 24;
 const EMPTY_TEXT_LINES: usize = 2;
 const LINK_TEXT: TextStyle = TextStyle { size_px: 13.0, line_height_px: 19.0, weight: 450, ..TextStyle::CAP };
 const EMPTY_TEXT: TextStyle = LINK_TEXT;
-const PROMPT_PAD_X: i32 = 10;
-const PROMPT_PAD_TOP: i32 = SP2;
+const INFO_TEXT: TextStyle = TextStyle { size_px: 12.0, line_height_px: 16.0, weight: 450, ..TextStyle::NUM };
+const PROMPT_PAD_TOP: i32 = SP1;
 const PROMPT_PAD_BOTTOM: i32 = 10;
-const PROMPT_TITLE: i32 = 16;
-const PROMPT_FIELD: i32 = 32;
-const PROMPT_ERROR: i32 = 14;
+const PROMPT_FIELD: i32 = 34;
+const PROMPT_ERROR: i32 = 16;
 const PROMPT_PILL: i32 = 28;
 const PROMPT_REVEAL: i32 = 24;
 const PROMPT_EYE: i32 = 14;
@@ -84,6 +85,8 @@ pub enum PanelAction {
     PromptReveal,
     PromptCancel,
     PromptSubmit,
+    Forget,
+    Disconnect,
     Settings,
 }
 
@@ -346,6 +349,8 @@ pub(super) struct DetailPanel {
     outputs_ready: bool,
     inputs: Option<Vec<AudioOutput>>,
     vpn_list: Option<Vec<VpnConnection>>,
+    wifi_info: Option<WifiInfo>,
+    expanded: Option<String>,
     sound_scroll: usize,
     list_scroll: usize,
     pending: Option<Pending>,
@@ -392,6 +397,7 @@ impl DetailPanel {
         self.view = None;
         self.slide.jump(0.0);
         self.prompt = None;
+        self.expanded = None;
         self.failure = None;
         self.bump();
     }
@@ -403,7 +409,7 @@ impl DetailPanel {
     }
 
     pub(super) fn collapse(&mut self) -> bool {
-        let collapsed = self.prompt.take().is_some();
+        let collapsed = self.prompt.take().is_some() | self.expanded.take().is_some();
         if collapsed {
             self.bump();
         }
@@ -508,6 +514,7 @@ pub(super) enum ItemKind {
     Vpn(usize),
     MicSlider,
     Network(usize),
+    Info(usize),
     Device(usize),
     Output(usize),
     Input(usize),
@@ -565,7 +572,6 @@ pub(super) fn detail_geometry(height: i32, radio: bool, link: bool) -> DetailGeo
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PromptParts {
-    pub(super) title: LocalRect,
     pub(super) field: LocalRect,
     pub(super) reveal: LocalRect,
     pub(super) error: Option<LocalRect>,
@@ -573,19 +579,19 @@ pub(super) struct PromptParts {
     pub(super) connect: LocalRect,
 }
 
+const ACCORDION_INDENT: i32 = ROW_PAD + ROW_WELL + ROW_GAP;
+
 const fn prompt_height(failed: bool) -> i32 {
     let error = if failed { PROMPT_ERROR + SP2 } else { 0 };
-    PROMPT_PAD_TOP + PROMPT_TITLE + SP2 + PROMPT_FIELD + SP2 + error + PROMPT_PILL + PROMPT_PAD_BOTTOM
+    PROMPT_PAD_TOP + PROMPT_FIELD + SP2 + error + PROMPT_PILL + PROMPT_PAD_BOTTOM
 }
 
 pub(super) fn prompt_parts(rect: LocalRect, failed: bool, (cancel_w, connect_w): (i32, i32)) -> PromptParts {
-    let (left, right) = (rect.loc.x + PROMPT_PAD_X, rect.loc.x + rect.size.w - PROMPT_PAD_X);
+    let (left, right) = (rect.loc.x + ACCORDION_INDENT, rect.loc.x + rect.size.w - ROW_PAD);
     let width = right - left;
     let mut y = rect.loc.y + PROMPT_PAD_TOP;
-    let title = local_rect(left, y, width, PROMPT_TITLE);
-    y += PROMPT_TITLE + SP2;
     let field = local_rect(left, y, width, PROMPT_FIELD);
-    let reveal_x = field.loc.x + field.size.w - SP1 - PROMPT_REVEAL;
+    let reveal_x = field.loc.x + field.size.w - 3 - PROMPT_REVEAL;
     let reveal = local_rect(reveal_x, y + (PROMPT_FIELD - PROMPT_REVEAL) / 2, PROMPT_REVEAL, PROMPT_REVEAL);
     y += PROMPT_FIELD + SP2;
     let error = failed.then(|| {
@@ -594,8 +600,26 @@ pub(super) fn prompt_parts(rect: LocalRect, failed: bool, (cancel_w, connect_w):
         error
     });
     let connect = local_rect(right - connect_w, y, connect_w, PROMPT_PILL);
-    let cancel = local_rect(connect.loc.x - SP1 - cancel_w, y, cancel_w, PROMPT_PILL);
-    PromptParts { title, field, reveal, error, cancel, connect }
+    let cancel = local_rect(connect.loc.x - SP2 - cancel_w, y, cancel_w, PROMPT_PILL);
+    PromptParts { field, reveal, error, cancel, connect }
+}
+
+pub(super) struct InfoParts {
+    pub(super) line: LocalRect,
+    pub(super) forget: LocalRect,
+    pub(super) disconnect: LocalRect,
+}
+
+const INFO_HEIGHT: i32 = PROMPT_PAD_TOP + PROMPT_ERROR + SP2 + PROMPT_PILL + PROMPT_PAD_BOTTOM;
+
+pub(super) fn info_parts(rect: LocalRect, (forget_w, disconnect_w): (i32, i32)) -> InfoParts {
+    let (left, right) = (rect.loc.x + ACCORDION_INDENT, rect.loc.x + rect.size.w - ROW_PAD);
+    let y = rect.loc.y + PROMPT_PAD_TOP;
+    let line = local_rect(left, y, right - left, PROMPT_ERROR);
+    let buttons = y + PROMPT_ERROR + SP2;
+    let disconnect = local_rect(right - disconnect_w, buttons, disconnect_w, PROMPT_PILL);
+    let forget = local_rect(disconnect.loc.x - SP2 - forget_w, buttons, forget_w, PROMPT_PILL);
+    InfoParts { line, forget, disconnect }
 }
 
 struct Column<'a> {
@@ -656,14 +680,19 @@ fn push_network(column: &mut Column<'_>, panel: &DetailPanel, index: usize) -> b
     };
     let prompt = panel.prompt.as_ref().filter(|prompt| prompt.ssid == network.ssid);
     let failed = panel.failure.as_ref().is_some_and(|failure| failure.key == network.ssid);
-    let extra = prompt.map_or(0, |_| prompt_height(failed));
+    let info = network.connected && panel.expanded.as_deref() == Some(network.ssid.as_str());
+    let (kind, extra) = match (prompt, info) {
+        (Some(_), _) => (Some(ItemKind::Prompt(index)), prompt_height(failed)),
+        (None, true) => (Some(ItemKind::Info(index)), INFO_HEIGHT),
+        (None, false) => (None, 0),
+    };
     if !column.fits(DETAIL_CARD + extra) {
         return false;
     }
     column.card(ItemKind::Network(index), row_slot(index));
-    if prompt.is_some() {
+    if let Some(kind) = kind {
         column.y -= DETAIL_CARD_GAP;
-        column.push(ItemKind::Prompt(index), extra, None);
+        column.push(kind, extra, None);
         column.y += DETAIL_CARD_GAP;
     }
     true
@@ -1055,11 +1084,28 @@ impl Topbar {
             self.settle_focus_on_row(ssid);
         } else {
             self.qs_panel.prompt = Some(Prompt::new(ssid.to_string()));
+            self.qs_panel.expanded = None;
             self.set_focused(Some(Slot::QsPasswordField));
         }
         self.qs_panel.failure = None;
         self.qs_panel.bump();
         self.touch();
+    }
+
+    pub fn toggle_info(&mut self, ssid: &str) {
+        if self.qs_panel.expanded.as_deref() == Some(ssid) {
+            self.qs_panel.expanded = None;
+        } else {
+            self.qs_panel.expanded = Some(ssid.to_string());
+            self.qs_panel.prompt = None;
+        }
+        self.qs_panel.bump();
+        self.touch();
+    }
+
+    #[must_use]
+    pub fn expanded_network(&self) -> Option<&str> {
+        self.qs_panel.expanded.as_deref()
     }
 
     pub fn set_caps_lock(&mut self, on: bool) -> bool {
@@ -1160,6 +1206,12 @@ impl Topbar {
                 self.qs_panel.vpn_list = Some(vpns);
             }
             NetEvent::VpnResult { name, result } => self.settle_pending(&name, result),
+            NetEvent::WifiInfo(info) => {
+                if self.qs_panel.wifi_info == info {
+                    return false;
+                }
+                self.qs_panel.wifi_info = info;
+            }
             NetEvent::Wifi(networks) => {
                 if self.qs_panel.wifi_ready && self.qs_panel.wifi == networks {
                     return false;
@@ -1232,6 +1284,11 @@ impl Topbar {
                 slots.push((Slot::QsPromptCancel, parts.cancel));
                 slots.push((Slot::QsPromptConnect, parts.connect));
             }
+            if let ItemKind::Info(_) = item.kind {
+                let parts = info_parts(item.rect, info_pills(painter));
+                slots.push((Slot::QsNetForget, parts.forget));
+                slots.push((Slot::QsNetDisconnect, parts.disconnect));
+            }
             if let ItemKind::PowerConfirm(action) = item.kind {
                 let (cancel, confirm) = confirm_buttons(painter, item.rect, action);
                 slots.push((Slot::QsPowerCancel, cancel));
@@ -1245,10 +1302,17 @@ impl Topbar {
     }
 }
 
+fn info_pills(painter: &crate::paint::Painter) -> (i32, i32) {
+    (
+        super::qs_confirm_pill_width(painter, t(Key::QsForgetNetwork)),
+        super::qs_confirm_pill_width(painter, t(Key::QsDisconnectShort)),
+    )
+}
+
 fn prompt_pills(painter: &crate::paint::Painter) -> (i32, i32) {
     (
         super::qs_confirm_pill_width(painter, t(Key::PowerCancel)),
-        super::qs_confirm_pill_width(painter, t(Key::QsConnect)),
+        super::qs_confirm_pill_width(painter, t(Key::QsConnectShort)),
     )
 }
 
@@ -1380,6 +1444,7 @@ fn draw_item(
                 draw_prompt(c, ctx, rect, prompt, panel.failed(index));
             }
         }
+        ItemKind::Info(_) => draw_info(c, ctx, rect, panel.wifi_info.as_ref()),
         ItemKind::Device(index) => {
             if let Some(device) = panel.devices.get(index) {
                 draw_device_row(c, ctx, rect, device, panel.status_for(&device.mac));
@@ -1913,27 +1978,47 @@ fn draw_empty(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, em
     }
 }
 
-fn draw_prompt(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, prompt: &Prompt, failed: bool) {
+fn draw_button(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, label: &str, primary: bool) {
     let theme = ctx.theme;
+    let (fill, ink) =
+        if primary { (theme.active_background, theme.active_label) } else { (theme.track_soft, theme.label) };
+    c.fill(rect, fill, R2);
+    c.text_in(ctx.painter, rect, TextAlign::Center, label, ink, &super::QS_PILL_TEXT);
+}
+
+fn draw_prompt(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, prompt: &Prompt, failed: bool) {
     let parts = prompt_parts(rect, failed, prompt_pills(ctx.painter));
-    let title = t(Key::QsPasswordFor).replace("{ssid}", &prompt.ssid);
-    c.text_in(ctx.painter, parts.title, TextAlign::Left, &title, theme.label, &super::QS_TITLE);
-    draw_password_field(c, ctx, (parts.field, parts.reveal), prompt);
+    draw_password_field(c, ctx, (parts.field, parts.reveal), prompt, failed);
     if let Some(error) = parts.error {
-        c.text_in(ctx.painter, error, TextAlign::Left, t(Key::QsWrongPassword), theme.danger, &super::QS_NOTE);
+        let text = t(Key::QsWrongPasswordRetry);
+        c.text_in(ctx.painter, error, TextAlign::Left, text, ctx.theme.danger, &super::QS_NOTE);
     }
-    let cancel_colour = if ctx.hovered == Some(Slot::QsPromptCancel) { theme.label } else { theme.muted };
-    c.fill(parts.cancel, theme.fill_2, R_ROUND);
-    c.text_in(ctx.painter, parts.cancel, TextAlign::Center, t(Key::PowerCancel), cancel_colour, &super::QS_PILL_TEXT);
-    c.fill(parts.connect, theme.active_background, R_ROUND);
-    c.text_in(
-        ctx.painter,
-        parts.connect,
-        TextAlign::Center,
-        t(Key::QsConnect),
-        theme.active_label,
-        &super::QS_PILL_TEXT,
-    );
+    draw_button(c, ctx, parts.cancel, t(Key::PowerCancel), false);
+    draw_button(c, ctx, parts.connect, t(Key::QsConnectShort), true);
+}
+
+fn info_line(info: &WifiInfo) -> String {
+    let band = match info.freq_mhz {
+        0 => None,
+        1..3000 => Some(t(Key::QsBand24)),
+        3000..5925 => Some(t(Key::QsBand5)),
+        _ => Some(t(Key::QsBand6)),
+    };
+    let rate = (info.rate_mbps > 0).then(|| t(Key::QsRate).replace("{}", &info.rate_mbps.to_string()));
+    std::iter::once(info.ip.clone())
+        .filter(|ip| !ip.is_empty())
+        .chain(band.map(str::to_string))
+        .chain(rate)
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
+}
+
+fn draw_info(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, info: Option<&WifiInfo>) {
+    let parts = info_parts(rect, info_pills(ctx.painter));
+    let line = info.map(info_line).unwrap_or_default();
+    c.text_in(ctx.painter, parts.line, TextAlign::Left, &line, ctx.theme.muted, &INFO_TEXT);
+    draw_button(c, ctx, parts.forget, t(Key::QsForgetNetwork), false);
+    draw_button(c, ctx, parts.disconnect, t(Key::QsDisconnectShort), false);
 }
 
 fn draw_eye(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, revealed: bool) {
@@ -1953,11 +2038,16 @@ fn draw_eye(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, reve
 
 fn draw_password_field(
     c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, (boxed, reveal): (LocalRect, LocalRect), prompt: &Prompt,
+    failed: bool,
 ) {
     let theme = ctx.theme;
     let field = &prompt.field;
-    c.fill(boxed, theme.popover_bg, R2);
-    c.stroke(boxed, 1.0, R2, theme.active_background);
+    let (edge, ring) =
+        if failed { (theme.danger, theme.danger_soft) } else { (theme.active_background, theme.acc_ring) };
+    let halo = local_rect(boxed.loc.x - 3, boxed.loc.y - 3, boxed.size.w + 6, boxed.size.h + 6);
+    c.fill(halo, ring, R2 + 3.0);
+    c.fill(boxed, theme.view_bg, R2);
+    c.stroke(boxed, 1.0, R2, edge);
     draw_eye(c, ctx, reveal, prompt.reveal);
     let (left, _, top, bottom) = band(boxed);
     let mut right = reveal.loc.x;
@@ -1979,7 +2069,7 @@ fn draw_password_field(
     let text_band = (text_left, text_right, top, bottom);
     let style = TextStyle::CALL;
     if field.is_empty() {
-        c.text(ctx.painter, text_band, TextAlign::Left, t(Key::QsPassword), theme.faint, &style);
+        c.text(ctx.painter, text_band, TextAlign::Left, t(Key::QsPasswordPlaceholder), theme.faint, &style);
     } else {
         let shown = prompt.shown();
         if field.selection().is_some() {
@@ -2180,6 +2270,35 @@ mod tests {
                 Slot::QsDetailSettings,
             ]
         );
+    }
+
+    #[test]
+    fn the_connected_network_unfolds_its_details_and_one_accordion_is_open_at_a_time() {
+        let mut bar = open_wifi();
+        bar.apply_net_event(NetEvent::WifiInfo(Some(WifiInfo {
+            ip: "192.168.1.24".into(),
+            freq_mhz: 5180,
+            rate_mbps: 866,
+        })));
+        bar.toggle_info("Home");
+        relayout(&mut bar);
+        let home = bar.slot_rect(Slot::QsDetailRow(0)).expect("home row");
+        let forget = bar.slot_rect(Slot::QsNetForget).expect("forget");
+        let disconnect = bar.slot_rect(Slot::QsNetDisconnect).expect("disconnect");
+        assert!(forget.loc.y > home.loc.y + home.size.h && forget.loc.x + forget.size.w < disconnect.loc.x);
+        assert_eq!(bar.action_at(centre(forget)), Some(TopbarAction::QsPanel(PanelAction::Forget)));
+        assert_eq!(bar.action_at(centre(disconnect)), Some(TopbarAction::QsPanel(PanelAction::Disconnect)));
+        assert_eq!(bar.expanded_network(), Some("Home"));
+        let line = info_line(bar.qs_panel.wifi_info.as_ref().expect("info"));
+        assert!(line.starts_with("192.168.1.24") && line.contains("866"), "{line}");
+
+        bar.toggle_prompt("Neighbour");
+        assert_eq!(bar.expanded_network(), None, "the password drawer folds the details");
+        bar.toggle_info("Home");
+        assert!(bar.qs_panel.prompt.is_none(), "and the other way round");
+        assert!(bar.qs_escape(), "Esc folds the accordion first");
+        assert_eq!(bar.expanded_network(), None);
+        assert_eq!(bar.detail(), Some(Detail::Wifi));
     }
 
     #[test]

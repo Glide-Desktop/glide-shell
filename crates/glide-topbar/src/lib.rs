@@ -435,6 +435,8 @@ pub enum Slot {
     QsPromptReveal,
     QsPromptCancel,
     QsPromptConnect,
+    QsNetForget,
+    QsNetDisconnect,
     QsDetailSettings,
     Search,
     Privacy,
@@ -699,6 +701,8 @@ impl Slot {
             Self::QsPromptReveal => TopbarAction::QsPanel(PanelAction::PromptReveal),
             Self::QsPromptCancel => TopbarAction::QsPanel(PanelAction::PromptCancel),
             Self::QsPromptConnect => TopbarAction::QsPanel(PanelAction::PromptSubmit),
+            Self::QsNetForget => TopbarAction::QsPanel(PanelAction::Forget),
+            Self::QsNetDisconnect => TopbarAction::QsPanel(PanelAction::Disconnect),
             Self::QsDetailSettings => TopbarAction::QsPanel(PanelAction::Settings),
             Self::Search => TopbarAction::ToggleLauncher,
             Self::Privacy => TopbarAction::TogglePrivacy,
@@ -6535,6 +6539,18 @@ mod tests {
 
     type PreviewAdjust = fn(&mut crate::system_info::SystemStatus, &mut Topbar);
 
+    fn preview_variant(bar: &mut Topbar, variant: &str) {
+        match variant {
+            "-info" => {
+                let info = crate::qs_net::WifiInfo { ip: "192.168.1.24".into(), freq_mhz: 5180, rate_mbps: 866 };
+                bar.apply_net_event(crate::qs_net::NetEvent::WifiInfo(Some(info)));
+                bar.toggle_info("Home");
+            }
+            "-password" => bar.toggle_prompt("Cafe Mriia"),
+            _ => {}
+        }
+    }
+
     fn preview_lists(bar: &mut Topbar) {
         use crate::qs_net::{BtDevice, BtKind, NetEvent, Security, VpnConnection, VpnKind, WifiNetwork};
         let net = |ssid: &str, security, signal, connected, saved| WifiNetwork {
@@ -6644,27 +6660,29 @@ mod tests {
                     continue;
                 }
                 preview_lists(&mut bar);
-                for (page, armed) in [
-                    (Detail::Battery, None),
-                    (Detail::Power, None),
-                    (Detail::Power, Some(PowerAction::Restart)),
-                    (Detail::Sound, None),
-                    (Detail::Wifi, None),
-                    (Detail::Bluetooth, None),
-                    (Detail::Vpn, None),
+                for (page, armed, variant) in [
+                    (Detail::Battery, None, ""),
+                    (Detail::Power, None, ""),
+                    (Detail::Power, Some(PowerAction::Restart), "-armed"),
+                    (Detail::Sound, None, ""),
+                    (Detail::Wifi, None, ""),
+                    (Detail::Wifi, None, "-info"),
+                    (Detail::Wifi, None, "-password"),
+                    (Detail::Bluetooth, None, ""),
+                    (Detail::Vpn, None, ""),
                 ] {
                     bar.open_detail(page);
                     if let Some(action) = armed {
                         bar.arm_power(action, vec!["Firefox".into(), "Files".into(), "Terminal".into()]);
                     }
+                    preview_variant(&mut bar, variant);
                     let height = bar.page_height(Some(&painter), page);
                     let mut canvas = Canvas::popover((QS_WIDTH, height), 2, R3, theme.popover_bg, theme.line)
                         .expect("canvas")
                         .with_icons(Some(&mut icons));
                     let status = bar.system_status().clone();
                     panels::draw_detail(&mut canvas, &ctx, &bar.qs_panel, page, &status, 1.0);
-                    let suffix = if armed.is_some() { "-armed" } else { "" };
-                    save(&canvas, format!("qs-page-{page:?}{suffix}-{appearance:?}.png"));
+                    save(&canvas, format!("qs-page-{page:?}{variant}-{appearance:?}.png"));
                     bar.close_detail();
                 }
             }

@@ -134,8 +134,16 @@ pub struct VpnConnection {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WifiInfo {
+    pub ip: String,
+    pub freq_mhz: u32,
+    pub rate_mbps: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetEvent {
+    WifiInfo(Option<WifiInfo>),
     Vpn(Vec<VpnConnection>),
     VpnResult { name: String, result: Result<(), ConnectError> },
     Wifi(Vec<WifiNetwork>),

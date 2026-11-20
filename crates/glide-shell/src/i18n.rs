@@ -379,6 +379,15 @@ glide_app::catalogue! {
     QsLinkPower => "Power Settings", "Налаштування живлення";
     QsLinkVpn => "VPN Settings", "Налаштування VPN";
     QsVpnSection => "Connections", "З\u{2019}єднання";
+    QsForgetNetwork => "Forget Network", "Забути мережу";
+    QsConnectShort => "Connect", "Під\u{2019}єднатися";
+    QsDisconnectShort => "Disconnect", "Від\u{2019}єднатися";
+    QsPasswordPlaceholder => "Network password", "Пароль до мережі";
+    QsWrongPasswordRetry => "The password doesn\u{2019}t match. Try again.", "Пароль не підходить. Спробуйте ще раз.";
+    QsBand24 => "2.4 GHz", "2,4 ГГц";
+    QsBand5 => "5 GHz", "5 ГГц";
+    QsBand6 => "6 GHz", "6 ГГц";
+    QsRate => "{} Mbit/s", "{} Мбіт/с";
     QsNoVpn => "No VPN connections", "Немає з\u{2019}єднань VPN";
     QsVpnWireGuard => "WireGuard", "WireGuard";
     QsVpnGeneric => "VPN", "VPN";

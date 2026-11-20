@@ -14,7 +14,7 @@ const BLUETOOTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub use glide_system::spawn::{run_with_input, run_with_timeout};
 pub use glide_topbar::qs_net::{
-    AudioOutput, BtDevice, BtKind, ConnectError, NetEvent, Security, VpnConnection, VpnKind, WifiNetwork,
+    AudioOutput, BtDevice, BtKind, ConnectError, NetEvent, Security, VpnConnection, VpnKind, WifiInfo, WifiNetwork,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -306,6 +306,7 @@ pub enum NetRequest {
     Vpn { name: String, up: bool },
     ConnectWifi { ssid: String, password: Option<String>, saved: bool },
     DisconnectWifi { ssid: String },
+    ForgetWifi { ssid: String },
     Bluetooth { mac: String, connect: bool },
     UseOutput { name: String },
     UseInput { name: String },
@@ -329,6 +330,7 @@ impl std::fmt::Debug for NetRequest {
                 .field("saved", saved)
                 .finish(),
             Self::DisconnectWifi { ssid } => f.debug_struct("DisconnectWifi").field("ssid", ssid).finish(),
+            Self::ForgetWifi { ssid } => f.debug_struct("ForgetWifi").field("ssid", ssid).finish(),
             Self::Bluetooth { mac, connect } => {
                 f.debug_struct("Bluetooth").field("mac", mac).field("connect", connect).finish()
             }
@@ -405,9 +407,19 @@ pub fn request(request: NetRequest) {
     }
 }
 
+fn emit_wifi() {
+    emit(NetEvent::Wifi(scan_wifi()));
+    emit(NetEvent::WifiInfo(connected_wifi_info()));
+}
+
 fn run_request(request: NetRequest) {
     match request {
-        NetRequest::ScanWifi => emit(NetEvent::Wifi(scan_wifi())),
+        NetRequest::ScanWifi => emit_wifi(),
+        NetRequest::ForgetWifi { ssid } => {
+            let result = forget_wifi(&ssid);
+            emit(NetEvent::WifiResult { ssid, result });
+            emit_wifi();
+        }
         NetRequest::ScanBluetooth => emit(NetEvent::Bluetooth(scan_bluetooth())),
         NetRequest::ConnectWifi { ssid, password, saved } => {
             let result = connect_wifi(&ssid, password.as_deref(), saved);
@@ -415,12 +427,12 @@ fn run_request(request: NetRequest) {
                 tracing::info!(ssid, ?error, "wi-fi connection failed");
             }
             emit(NetEvent::WifiResult { ssid, result });
-            emit(NetEvent::Wifi(scan_wifi()));
+            emit_wifi();
         }
         NetRequest::DisconnectWifi { ssid } => {
             let result = disconnect_wifi(&ssid);
             emit(NetEvent::WifiResult { ssid, result });
-            emit(NetEvent::Wifi(scan_wifi()));
+            emit_wifi();
         }
         NetRequest::Bluetooth { mac, connect } => {
             let verb = if connect { "connect" } else { "disconnect" };
@@ -595,6 +607,40 @@ fn wifi_device_for_ssid(text: &str, ssid: &str) -> Option<String> {
     })
 }
 
+fn forget_wifi(ssid: &str) -> Result<(), ConnectError> {
+    let uuids: Vec<String> = saved_wifi_profiles()
+        .into_iter()
+        .filter_map(|(profile_ssid, uuid)| (profile_ssid == ssid).then_some(uuid))
+        .collect();
+    if uuids.is_empty() {
+        return disconnect_wifi(ssid);
+    }
+    let deleted = uuids.iter().all(|uuid| {
+        run_with_timeout("nmcli", &["con", "delete", "uuid", uuid], WIFI_CONNECT_TIMEOUT)
+            .is_some_and(|output| output.status.success())
+    });
+    if deleted { Ok(()) } else { Err(ConnectError::Failed) }
+}
+
+#[must_use]
+pub fn parse_connected_wifi(text: &str) -> Option<(String, u32, u32)> {
+    text.lines().find_map(|line| {
+        let fields = split_terse(line);
+        let [active, device, freq, rate, ..] = fields.as_slice() else { return None };
+        let number = |text: &str| text.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        (active.trim() == "*" && !device.is_empty()).then(|| (device.clone(), number(freq), number(rate)))
+    })
+}
+
+fn connected_wifi_info() -> Option<WifiInfo> {
+    let list = stdout_of("nmcli", &["-t", "-f", "IN-USE,DEVICE,FREQ,RATE", "dev", "wifi", "list", "--rescan", "no"])?;
+    let (device, freq_mhz, rate_mbps) = parse_connected_wifi(&list)?;
+    let ip = stdout_of("nmcli", &["-g", "IP4.ADDRESS", "dev", "show", &device])
+        .and_then(|text| text.lines().next().map(|line| line.split('/').next().unwrap_or_default().trim().to_string()))
+        .unwrap_or_default();
+    Some(WifiInfo { ip, freq_mhz, rate_mbps })
+}
+
 fn disconnect_wifi(ssid: &str) -> Result<(), ConnectError> {
     let device = stdout_of("nmcli", &["-t", "-f", "IN-USE,SSID,DEVICE", "dev", "wifi", "list", "--rescan", "no"])
         .and_then(|text| wifi_device_for_ssid(&text, ssid))
@@ -724,6 +770,17 @@ impl GlideState {
             PanelAction::PromptReveal => {
                 self.topbar.toggle_reveal();
             }
+            PanelAction::Forget | PanelAction::Disconnect => {
+                if let Some(ssid) = self.topbar.expanded_network().map(str::to_string) {
+                    self.topbar.toggle_info(&ssid);
+                    self.topbar.begin_disconnect(&ssid);
+                    request(if action == PanelAction::Forget {
+                        NetRequest::ForgetWifi { ssid }
+                    } else {
+                        NetRequest::DisconnectWifi { ssid }
+                    });
+                }
+            }
             PanelAction::PromptCancel => self.run_qs_field_key(crate::topbar::FieldKey::Cancel),
             PanelAction::PromptSubmit => self.run_qs_field_key(crate::topbar::FieldKey::Submit),
             PanelAction::Settings => {
@@ -743,10 +800,7 @@ impl GlideState {
 
     fn activate_detail_row(&mut self, index: u16) {
         match self.topbar.detail_row(index) {
-            Some(RowTarget::Network(network)) if network.connected => {
-                self.topbar.begin_disconnect(&network.ssid);
-                request(NetRequest::DisconnectWifi { ssid: network.ssid });
-            }
+            Some(RowTarget::Network(network)) if network.connected => self.topbar.toggle_info(&network.ssid),
             Some(RowTarget::Network(network)) if network.security == Security::Enterprise && !network.saved => {
                 self.topbar.close_popup();
                 open_settings_panel("network");
@@ -1052,6 +1106,13 @@ mod tests {
         }
         assert!(matches!(scan_for(Detail::Wifi), Some(NetRequest::ScanWifi)));
         assert!(matches!(scan_for(Detail::Vpn), Some(NetRequest::ScanVpn)));
+    }
+
+    #[test]
+    fn the_connected_network_names_its_device_band_and_rate() {
+        let text = " :wlan0:2437 MHz:54 Mbit/s\n*:wlan0:5180 MHz:866 Mbit/s\n";
+        assert_eq!(parse_connected_wifi(text), Some(("wlan0".to_string(), 5180, 866)));
+        assert_eq!(parse_connected_wifi(" :wlan0:2437 MHz:54 Mbit/s\n"), None);
     }
 
     #[test]
