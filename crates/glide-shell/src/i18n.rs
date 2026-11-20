@@ -381,6 +381,10 @@ glide_app::catalogue! {
     QsVpnSection => "Connections", "З\u{2019}єднання";
     QsForgetNetwork => "Forget Network", "Забути мережу";
     QsUntil => "Until {}", "До {}";
+    QsTipScreenshot => "Screenshot", "Знімок екрана";
+    QsTipSettings => "Settings", "Налаштування";
+    QsTipLock => "Lock", "Заблокувати";
+    QsTipPower => "Sleep, restart, shut down", "Сон, перезапуск, вимкнення";
     QsStarting => "Turning on\u{2026}", "Вмикається\u{2026}";
     QsWifiStarting => "Wi-Fi is turning on", "Wi-Fi вмикається";
     QsWifiStartingText => "Networks will show up in a second.", "Мережі з\u{2019}являться за секунду.";

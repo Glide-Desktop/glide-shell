@@ -51,6 +51,7 @@ pub use island::{ALERT_HOLD, IslandAlert};
 mod status;
 
 mod face_tip;
+mod qs_tip;
 mod tray;
 
 mod headset_view;
@@ -889,6 +890,7 @@ pub struct Topbar {
     qs_height: Anim,
     night_light_until: Option<String>,
     volume_max: u8,
+    qs_tip: qs_tip::QsTip,
     qs_bg_cache: Cache<(i32, i32)>,
     qs_sliders: HashMap<SliderKey, MemoryRenderBuffer>,
     qs_detail_cache: Cache<panels::DetailKey>,
@@ -995,6 +997,7 @@ impl Topbar {
         self.qs_cache.clear();
         self.qs_bg_cache.clear();
         self.qs_spin_cache.clear();
+        self.qs_tip.clear();
         self.qs_sliders.clear();
         self.qs_detail_cache.clear();
         self.headset_cache.clear();
@@ -1257,7 +1260,7 @@ impl Topbar {
         let controls = controls
             || self.tile_anims.values().any(Anim::is_animating)
             || self.menu_births.values().any(Anim::is_animating);
-        let detail = self.qs_panel.is_animating() || self.qs_meter_running();
+        let detail = self.qs_panel.is_animating() || self.qs_meter_running() || self.qs_tip.is_animating();
         let extras = self.calendar.is_animating() || self.indicators.is_animating() || self.island.is_animating();
         let tray = self.tray_is_animating() || self.face_tip.is_animating();
         let sliding = self.slides.values().any(|slide| slide.is_animating(motion::t3()));
@@ -1449,6 +1452,10 @@ impl Topbar {
 
     fn settle_motion(&mut self) {
         self.sync_tile_anims();
+        if self.open_popup != Some(OpenPopup::QuickSettings) || self.qs_panel.view.is_some() {
+            self.qs_tip.hover(None);
+        }
+        self.qs_tip.settle();
         let sliding = self.qs_panel.slide.is_animating();
         let page_done = !sliding && self.qs_panel.view.is_none();
         let moving = sliding || self.qs_height.is_animating();
@@ -2176,6 +2183,7 @@ impl Topbar {
             self.hover_layers.entry(slot).or_default().retarget(1.0, motion::t1(), E_IO);
         }
         self.hovered = hovered;
+        self.qs_tip.hover(hovered.filter(|_| self.open_popup == Some(OpenPopup::QuickSettings)));
         self.tray_hover(hovered);
         self.follow_menu_hover(hovered);
         true
@@ -3986,6 +3994,7 @@ fn push_quick_settings<R: ShellRenderer>(topbar: &mut Topbar, frame: &mut Frame<
     let reveal = topbar.popup_progress();
     {
         let (renderer, painter, icons, scale, output_scale, elements) = frame.parts();
+        qs_tip::push(topbar, renderer, painter, (scale, output_scale), elements);
         panels::push_detail(topbar, renderer, painter, icons, rect, reveal, scale, output_scale, elements);
     }
     let slide = topbar.qs_panel.slide_progress();
