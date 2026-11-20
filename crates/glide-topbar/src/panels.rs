@@ -1,7 +1,7 @@
 use super::{
     Anim, Canvas, Color, E_OUT, GlyphPainter, LocalRect, Logical, MemoryRenderBufferRenderElement, OpenPopup, Placed,
-    Point, QS_PAD, QS_WIDTH, QsRenderContext, Rectangle, Scale, Slot, TextAlign, TextStyle, Topbar, TopbarTheme, band,
-    local_rect, motion, push_placed, text_w,
+    QS_PAD, QS_WIDTH, QsRenderContext, Rectangle, Scale, Slot, TextAlign, TextStyle, Topbar, TopbarTheme, band,
+    local_rect, motion, text_w,
 };
 
 use crate::i18n::{Key, t};
@@ -360,6 +360,8 @@ pub(super) struct DetailPanel {
     wifi_info: Option<WifiInfo>,
     scan: Scan,
     expanded: Option<String>,
+    opener: Option<Slot>,
+    origin: Option<LocalRect>,
     sound_scroll: usize,
     list_scroll: usize,
     pending: Option<Pending>,
@@ -399,7 +401,11 @@ impl DetailPanel {
     }
 
     pub(super) fn is_animating(&self) -> bool {
-        self.slide.is_animating()
+        self.slide.is_animating() || self.spinning()
+    }
+
+    fn spinning(&self) -> bool {
+        self.view.is_some() && (self.scan.running || self.pending.is_some() || self.netbird.row().1)
     }
 
     pub(super) fn reset(&mut self) {
@@ -998,11 +1004,18 @@ impl Topbar {
         if detail != Detail::Power {
             self.forget_power();
         }
+        let opens = super::TopbarAction::QsPanel(PanelAction::Open(detail));
+        let opener = self.focused.or(self.hovered).filter(|slot| slot.action() == opens).unwrap_or(more_slot(detail));
+        self.qs_panel.origin = self
+            .slot_rect(opener)
+            .zip(self.popup_rect)
+            .map(|(slot, popup)| Rectangle::new(slot.loc - popup.loc, slot.size));
+        self.qs_panel.opener = Some(opener);
         self.qs_panel.view = Some(detail);
         self.qs_panel.sound_scroll = 0;
         self.qs_panel.list_scroll = 0;
         self.qs_panel.shown = Some(detail);
-        self.qs_panel.slide.retarget(1.0, motion::t2(), E_OUT);
+        self.qs_panel.slide.retarget(1.0, motion::t3(), E_OUT);
         self.qs_panel.prompt = None;
         self.qs_panel.failure = None;
         self.qs_panel.bump();
@@ -1016,11 +1029,13 @@ impl Topbar {
             return false;
         };
         let keyboard = self.focused.is_some();
-        self.qs_panel.slide.retarget(0.0, motion::t2(), E_OUT);
+        self.qs_panel.slide.retarget(0.0, motion::t3(), E_OUT);
         self.qs_panel.prompt = None;
+        self.qs_panel.expanded = None;
         self.qs_panel.armed = None;
         self.qs_panel.bump();
-        self.set_focused(keyboard.then_some(more_slot(detail)));
+        let opener = self.qs_panel.opener.unwrap_or(more_slot(detail));
+        self.set_focused(keyboard.then_some(opener));
         self.touch();
         true
     }
@@ -1389,33 +1404,108 @@ pub(super) fn push_detail<R>(
     let hovered = topbar.hovered_in(Slot::in_quick_settings).filter(|_| topbar.qs_panel.view.is_some());
     let profile = super::quantize(topbar.profile_anim.value(), super::MOTION_QUANTUM);
     let revs = (topbar.qs_panel.rev, topbar.detail_rev, topbar.status_rev);
-    let key: DetailKey = (revs, hovered, detail, rect.size.h, profile);
+    let height = topbar.page_height(Some(painter), detail);
+    let key: DetailKey = (revs, hovered, detail, height, profile);
     let theme = &topbar.theme;
     let status = &topbar.system_status;
     let panel = &topbar.qs_panel;
     let Some(buffer) = topbar.qs_detail_cache.resolve(key, output_scale, || {
         let ctx = QsRenderContext { painter, theme, hovered };
-        let mut canvas = Canvas::new(rect.size.w, rect.size.h, output_scale)?.with_icons(Some(icons));
+        let mut canvas = Canvas::new(rect.size.w, height, output_scale)?.with_icons(Some(icons));
+        let full = canvas.full();
+        canvas.fill(full, theme.popover_bg, super::QS_RADIUS);
         let position = f64::from(profile) / super::MOTION_QUANTUM;
         draw_detail(&mut canvas, &ctx, panel, detail, status, position);
         Some(canvas.finish())
     }) else {
         return;
     };
-    let shift = ((1.0 - slide) * f64::from(QS_PAD)).round() as i32;
-    let alpha = slide as f32;
-    push_placed(
+    let buffer = buffer.clone();
+    let visible = local_rect(0, 0, rect.size.w, rect.size.h.min(height));
+    let clip = reveal_clip(topbar.qs_panel.origin, visible, slide);
+    if clip.size.w <= 0 || clip.size.h <= 0 {
+        return;
+    }
+    if topbar.qs_panel.spinning() {
+        let body = detail_geometry(height, has_radio(detail), has_link(detail)).body;
+        let items = detail_items(&topbar.qs_panel, detail, &topbar.system_status, body, Some(painter));
+        let marks = motion_marks(&topbar.qs_panel, &items, painter);
+        push_marks(topbar, renderer, (rect, clip, reveal), &marks, (scale, output_scale), elements);
+    }
+    let element = Rectangle::new(rect.loc + clip.loc, clip.size);
+    let placed = Placed { popup: rect, element, progress: reveal, alpha: 1.0 };
+    super::push_placed_from(renderer, &buffer, placed, Some(clip.loc), scale, elements);
+}
+
+fn push_marks<R>(
+    topbar: &mut Topbar, renderer: &mut R, (rect, clip, reveal): (Rectangle<i32, Logical>, LocalRect, f64),
+    marks: &Marks, (scale, output_scale): (Scale<f64>, i32), elements: &mut Vec<MemoryRenderBufferRenderElement<R>>,
+) where
+    R: crate::raster::ShellRenderer,
+{
+    let colour = topbar.theme.active_background;
+    let ms = now_ms();
+    let step = u8::try_from(ms % SPIN_PERIOD_MS * u128::from(SPIN_STEPS) / SPIN_PERIOD_MS).unwrap_or(0);
+    for spinner in &marks.spinners {
+        if !clip.contains(spinner.loc) {
+            continue;
+        }
+        let side = spinner.size.w;
+        let Some(buffer) = topbar
+            .qs_spin_cache
+            .resolve((step, side, side), output_scale, || draw_spinner_arc(side, step, colour, output_scale))
+        else {
+            continue;
+        };
+        let element = Rectangle::new(rect.loc + spinner.loc, spinner.size);
+        super::push_placed(
+            renderer,
+            buffer,
+            Placed { popup: rect, element, progress: reveal, alpha: 1.0 },
+            scale,
+            elements,
+        );
+    }
+    let Some(bar) = marks.sweep.filter(|bar| clip.contains(bar.loc)) else {
+        return;
+    };
+    let width = bar.size.w * SWEEP_SHARE / 100;
+    let phase = (ms % SWEEP_PERIOD_MS) as f64 / SWEEP_PERIOD_MS as f64;
+    let travel = super::E_IO.ease_f64(phase);
+    let start = -width + (f64::from(bar.size.w + width) * travel).round() as i32;
+    let (left, right) = (start.max(0), (start + width).min(bar.size.w));
+    if right <= left {
+        return;
+    }
+    let Some(buffer) = topbar
+        .qs_spin_cache
+        .resolve((SWEEP_KEY, width, SCAN_BAR), output_scale, || draw_sweep(width, colour, output_scale))
+    else {
+        return;
+    };
+    let element = Rectangle::new(
+        rect.loc + bar.loc + smithay::utils::Point::from((left, 0)),
+        smithay::utils::Size::from((right - left, SCAN_BAR)),
+    );
+    let placed = Placed { popup: rect, element, progress: reveal, alpha: 1.0 };
+    super::push_placed_from(
         renderer,
         buffer,
-        Placed {
-            popup: rect,
-            element: Rectangle::new(Point::from((rect.loc.x + shift, rect.loc.y)), rect.size),
-            progress: reveal,
-            alpha,
-        },
+        placed,
+        Some(smithay::utils::Point::from((left - start, 0))),
         scale,
         elements,
     );
+}
+
+pub(super) fn reveal_clip(origin: Option<LocalRect>, full: LocalRect, progress: f64) -> LocalRect {
+    let from = origin.unwrap_or_else(|| local_rect(full.loc.x, full.loc.y, full.size.w, DETAIL_HEAD.min(full.size.h)));
+    let lerp = |a: i32, b: i32| a + (f64::from(b - a) * progress.clamp(0.0, 1.0)).round() as i32;
+    let left = lerp(from.loc.x, full.loc.x).max(full.loc.x);
+    let top = lerp(from.loc.y, full.loc.y).max(full.loc.y);
+    let right = lerp(from.loc.x + from.size.w, full.loc.x + full.size.w).min(full.loc.x + full.size.w);
+    let bottom = lerp(from.loc.y + from.size.h, full.loc.y + full.size.h).min(full.loc.y + full.size.h);
+    local_rect(left, top, right - left, bottom - top)
 }
 
 fn confirm_buttons(painter: &crate::paint::Painter, rect: LocalRect, action: PowerAction) -> (LocalRect, LocalRect) {
@@ -1754,9 +1844,90 @@ struct RowSpec<'a> {
 
 fn draw_spinner(c: &mut Canvas<'_>, theme: &TopbarTheme, rect: LocalRect) {
     c.stroke(rect, 2.0, R_ROUND, theme.track);
-    let arc = local_rect(rect.loc.x + rect.size.w / 2 - 1, rect.loc.y, 2, 2);
-    c.fill(arc, theme.active_background, R_ROUND);
 }
+
+const SPIN_STEPS: u8 = 12;
+const SPIN_PERIOD_MS: u128 = 800;
+const SWEEP_PERIOD_MS: u128 = 1400;
+const SWEEP_KEY: u8 = u8::MAX;
+const SWEEP_SHARE: i32 = 34;
+
+fn draw_spinner_arc(side: i32, step: u8, colour: Color, scale: i32) -> Option<super::MemoryRenderBuffer> {
+    let mut c = Canvas::new(side, side, scale)?;
+    let radius = f64::from(side) / 2.0 - 1.0;
+    let centre = f64::from(side) / 2.0;
+    let start = std::f64::consts::TAU * f64::from(step) / f64::from(SPIN_STEPS) - std::f64::consts::FRAC_PI_2;
+    for dot in 0..9 {
+        let angle = start + std::f64::consts::FRAC_PI_2 * f64::from(dot) / 8.0;
+        let (x, y) = (centre + radius * angle.cos(), centre + radius * angle.sin());
+        c.fill(local_rect((x - 1.0).round() as i32, (y - 1.0).round() as i32, 2, 2), colour, 1.0);
+    }
+    Some(c.finish())
+}
+
+fn draw_sweep(width: i32, colour: Color, scale: i32) -> Option<super::MemoryRenderBuffer> {
+    let mut c = Canvas::new(width, SCAN_BAR, scale)?;
+    let full = c.full();
+    c.fill(full, colour, R_ROUND);
+    Some(c.finish())
+}
+
+fn tail_rect(row: LocalRect) -> LocalRect {
+    let right = row.loc.x + row.size.w - ROW_PAD;
+    local_rect(right - ROW_TAIL, row.loc.y + row.size.h / 2 - ROW_TAIL / 2, ROW_TAIL, ROW_TAIL)
+}
+
+fn scan_spinner_rect(painter: &crate::paint::Painter, section: LocalRect, panel: &DetailPanel) -> Option<LocalRect> {
+    let text = scan_label(panel).filter(|_| panel.scan.running)?;
+    let right = section.loc.x + section.size.w - SP2;
+    let left = right - text_w(painter, &text, &TextStyle::CAP);
+    let centre = section.loc.y + section.size.h / 2;
+    Some(local_rect(left - SP1 - SP1 / 2 - SCAN_SPINNER, centre - SCAN_SPINNER / 2, SCAN_SPINNER, SCAN_SPINNER))
+}
+
+fn scan_bar_rect(section: LocalRect) -> LocalRect {
+    local_rect(section.loc.x + SP2, section.loc.y + section.size.h - SCAN_BAR, section.size.w - SP2 * 2, SCAN_BAR)
+}
+
+pub(super) struct Marks {
+    spinners: Vec<LocalRect>,
+    sweep: Option<LocalRect>,
+}
+
+pub(super) fn motion_marks(panel: &DetailPanel, items: &[DetailItem], painter: &crate::paint::Painter) -> Marks {
+    let mut marks = Marks { spinners: Vec::new(), sweep: None };
+    for item in items
+        .iter()
+        .filter(|item| item.slot.is_some() || matches!(item.kind, ItemKind::WifiSection | ItemKind::VpnNetbird))
+    {
+        let busy_row = match item.kind {
+            ItemKind::Network(index) => panel.wifi.get(index).is_some_and(|n| busy(panel.status_for(&n.ssid))),
+            ItemKind::Device(index) => panel.devices.get(index).is_some_and(|d| busy(panel.status_for(&d.mac))),
+            ItemKind::Output(index) => panel.outputs.get(index).is_some_and(|o| busy(panel.status_for(&o.name))),
+            ItemKind::Input(index) => {
+                panel.devices(super::Drawer::Input).get(index).is_some_and(|o| busy(panel.status_for(&o.name)))
+            }
+            ItemKind::Vpn(index) => panel.vpns().get(index).is_some_and(|v| busy(panel.status_for(&v.name))),
+            ItemKind::VpnNetbird => panel.netbird.row().1,
+            ItemKind::WifiSection if item.slot.is_none() && panel.scan.running => {
+                marks.spinners.extend(scan_spinner_rect(painter, item.rect, panel));
+                marks.sweep = Some(scan_bar_rect(item.rect));
+                false
+            }
+            _ => false,
+        };
+        if busy_row {
+            marks.spinners.push(tail_rect(item.rect));
+        }
+    }
+    marks
+}
+
+fn now_ms() -> u128 {
+    glide_ui::clock::now().saturating_duration_since(*SPIN_EPOCH).as_millis()
+}
+
+static SPIN_EPOCH: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
 
 fn draw_row(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, spec: &RowSpec<'_>) {
     let theme = ctx.theme;
@@ -1931,9 +2102,7 @@ fn draw_wifi_section(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalR
     let mut right = rect.loc.x + rect.size.w - SP2;
     let centre = rect.loc.y + rect.size.h / 2;
     if panel.scan.running {
-        let bar = local_rect(rect.loc.x + SP2, rect.loc.y + rect.size.h - SCAN_BAR, rect.size.w - SP2 * 2, SCAN_BAR);
-        c.fill(bar, theme.fill_2, R_ROUND);
-        c.fill(local_rect(bar.loc.x, bar.loc.y, bar.size.w * 34 / 100, SCAN_BAR), theme.active_background, R_ROUND);
+        c.fill(scan_bar_rect(rect), theme.fill_2, R_ROUND);
     } else {
         let button = rescan_rect(rect);
         let icon =
@@ -2197,7 +2366,7 @@ fn masked(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::{TopbarAction, TopbarTheme};
-    use smithay::utils::Size;
+    use smithay::utils::{Point, Size};
 
     #[test]
     fn sound_scroll_reaches_inputs_after_many_outputs() {
@@ -2635,6 +2804,56 @@ mod tests {
         assert_eq!(bar.qs_panel.status_for("hdmi"), RowStatus::Connecting);
         bar.apply_net_event(NetEvent::OutputResult { name: "hdmi".into(), result: Err(ConnectError::Failed) });
         assert_eq!(bar.qs_panel.status_for("hdmi"), RowStatus::Failed(ConnectError::Failed));
+    }
+
+    #[test]
+    fn spinners_and_the_sweep_are_drawn_over_the_page_only_while_something_runs() {
+        let mut bar = open_wifi();
+        let painter = crate::paint::Painter::new(14.0, None);
+        let body = detail_geometry(super::super::QS_PAGE_MAX, true, true).body;
+        let marks = |bar: &Topbar| {
+            let items = detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), body, Some(&painter));
+            motion_marks(&bar.qs_panel, &items, &painter)
+        };
+        assert!(!bar.qs_panel.spinning());
+        let idle = marks(&bar);
+        assert!(idle.spinners.is_empty() && idle.sweep.is_none());
+        bar.begin_connect("Cafe");
+        bar.apply_net_event(NetEvent::WifiScanning(true));
+        assert!(bar.qs_panel.spinning() && bar.qs_panel.is_animating(), "the frame pump runs while it spins");
+        let busy = marks(&bar);
+        assert_eq!(busy.spinners.len(), 2, "the connecting row and the section");
+        assert!(busy.sweep.is_some());
+        assert!(busy.spinners.iter().all(|spinner| body.contains(spinner.loc)));
+        for step in 0..SPIN_STEPS {
+            assert!(draw_spinner_arc(16, step, TopbarTheme::default().active_background, 2).is_some());
+        }
+    }
+
+    #[test]
+    fn a_page_grows_out_of_the_control_that_opened_it() {
+        let full = local_rect(0, 0, 368, 400);
+        let chevron = local_rect(320, 200, 32, 56);
+        assert_eq!(reveal_clip(Some(chevron), full, 0.0), chevron);
+        assert_eq!(reveal_clip(Some(chevron), full, 1.0), full);
+        let half = reveal_clip(Some(chevron), full, 0.5);
+        assert!(half.contains(chevron.loc) && full.contains(half.loc) && half.size.w < full.size.w);
+        let below = local_rect(320, 380, 32, 56);
+        let clipped = reveal_clip(Some(below), full, 0.0);
+        assert!(clipped.loc.y + clipped.size.h <= full.size.h, "never past the visible height");
+        assert_eq!(reveal_clip(None, full, 0.0).size.h, DETAIL_HEAD, "without an opener it unrolls from the top");
+
+        let mut bar = Topbar::new(TopbarTheme::default());
+        bar.toggle_popup(OpenPopup::QuickSettings);
+        relayout(&mut bar);
+        bar.set_focused(Some(Slot::QsVolumeMore));
+        bar.open_detail(Detail::Sound);
+        assert_eq!(bar.qs_panel.opener, Some(Slot::QsVolumeMore));
+        let popup = bar.popup_rect().expect("popup");
+        let slot = bar.slot_rect(Slot::QsVolumeMore).expect("chevron");
+        assert_eq!(bar.qs_panel.origin, Some(Rectangle::new(slot.loc - popup.loc, slot.size)));
+        bar.close_detail();
+        assert_eq!(bar.focused, Some(Slot::QsVolumeMore), "focus returns to the opener");
     }
 
     #[test]

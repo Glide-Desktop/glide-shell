@@ -880,6 +880,8 @@ pub struct Topbar {
     layout_cache: Cache<(u64, usize, Option<Slot>, bool, u8)>,
     coffee_cache: Cache<(bool, bool, (u8, u8))>,
     qs_cache: Cache<QsCacheKey>,
+    qs_spin_cache: Cache<(u8, i32, i32)>,
+    qs_height: Anim,
     qs_bg_cache: Cache<(i32, i32)>,
     qs_sliders: HashMap<SliderKey, MemoryRenderBuffer>,
     qs_detail_cache: Cache<panels::DetailKey>,
@@ -985,6 +987,7 @@ impl Topbar {
         self.coffee_cache.clear();
         self.qs_cache.clear();
         self.qs_bg_cache.clear();
+        self.qs_spin_cache.clear();
         self.qs_sliders.clear();
         self.qs_detail_cache.clear();
         self.headset_cache.clear();
@@ -1239,6 +1242,7 @@ impl Topbar {
             &self.badge_anim,
             &self.segment_anim,
             &self.profile_anim,
+            &self.qs_height,
             &self.recording_anim,
         ]
         .into_iter()
@@ -1423,11 +1427,18 @@ impl Topbar {
 
     fn settle_motion(&mut self) {
         self.sync_tile_anims();
+        let sliding = self.qs_panel.slide.is_animating();
+        let page_done = !sliding && self.qs_panel.view.is_none();
+        let moving = sliding || self.qs_height.is_animating();
+        if moving || (page_done && self.qs_panel.shown.take().is_some()) {
+            self.touch();
+        }
         let duration = motion::t2();
         self.popup_reveal.settle(duration);
         if self.closing_popup.is_some() && !self.popup_reveal.is_visible(duration) {
             self.closing_popup = None;
             self.forget_power();
+            self.qs_height = Anim::at(0.0);
             self.touch();
         }
         let reserved = self.unread > 0 || self.badge_anim.value() > 0.0;
@@ -1737,6 +1748,30 @@ impl Topbar {
 
     fn forget_power(&mut self) {
         self.qs_panel.armed = None;
+    }
+
+    fn qs_target_height(&self, painter: &crate::paint::Painter) -> i32 {
+        match self.qs_panel.view {
+            Some(detail) => self.page_height(Some(painter), detail),
+            None => qs_geometry(&self.qs_shape(Some(painter))).height,
+        }
+    }
+
+    fn sync_qs_height(&mut self, painter: &crate::paint::Painter) {
+        if self.open_popup != Some(OpenPopup::QuickSettings) {
+            return;
+        }
+        let target = f64::from(self.qs_target_height(painter));
+        if self.qs_height.target() <= 0.0 || !self.popup_reveal.is_visible(motion::t2()) {
+            self.qs_height.jump(target);
+        } else {
+            self.qs_height.retarget(target, motion::t3(), E_OUT);
+        }
+    }
+
+    fn qs_popup_height(&self, painter: &crate::paint::Painter) -> i32 {
+        let height = self.qs_height.value().round() as i32;
+        if height > 0 { height } else { self.qs_target_height(painter) }
     }
 
     fn qs_shape(&self, painter: Option<&crate::paint::Painter>) -> QsShape {
@@ -2200,6 +2235,7 @@ impl Topbar {
         }
 
         let mut popup_slots = std::mem::take(&mut menu.rows);
+        self.sync_qs_height(painter);
         let mut popup_rect = self
             .layout_popup(painter, (output, strip), (lang_rect, menu.anchor), &mut popup_slots)
             .or_else(|| self.layout_status_popup(&slots, output, strip.loc.y))
@@ -2241,6 +2277,7 @@ impl Topbar {
                     shape: self.qs_shape(Some(painter)),
                     volume: self.system_status.volume_available,
                     detail: self.detail_slots(painter),
+                    height: self.qs_popup_height(painter),
                 },
                 popup_slots,
             )),
@@ -2720,6 +2757,7 @@ struct QsLayoutInput {
     shape: QsShape,
     volume: bool,
     detail: Option<(i32, Vec<(Slot, LocalRect)>)>,
+    height: i32,
 }
 
 fn layout_qs_slots(
@@ -2728,8 +2766,7 @@ fn layout_qs_slots(
 ) -> Rectangle<i32, Logical> {
     let geometry = qs_geometry(&input.shape);
     let origin = Point::from((output.loc.x + output.size.w - PAD_X - QS_WIDTH, strip_y + HEIGHT + POPUP_GAP));
-    let height = input.detail.as_ref().map_or(geometry.height, |(height, _)| *height);
-    let popup = Rectangle::new(origin, Size::from((QS_WIDTH, height)));
+    let popup = Rectangle::new(origin, Size::from((QS_WIDTH, input.height)));
     let mut push = |slot: Slot, rect: LocalRect| slots.push((slot, offset_rect(rect, origin)));
     if let Some((_, detail)) = input.detail {
         for (slot, rect) in detail {
@@ -3917,8 +3954,10 @@ fn draw_qs_background((w, h): (i32, i32), theme: &TopbarTheme, scale: i32) -> Op
     Some(c.finish())
 }
 
+const QS_PAGE_AWAY: f64 = 24.0;
+
 fn qs_main_motion(slide: f64) -> (i32, f32) {
-    ((slide * f64::from(QS_PAD)).round() as i32, (1.0 - slide) as f32)
+    ((slide * QS_PAGE_AWAY).round() as i32, if slide >= 1.0 { 0.0 } else { 1.0 })
 }
 
 fn push_qs_main<R: ShellRenderer>(
@@ -3948,8 +3987,10 @@ fn push_qs_main<R: ShellRenderer>(
     }) else {
         return;
     };
-    let element = Rectangle::new(Point::from((left, rect.loc.y)), Size::from((rect.size.w, geometry.height)));
-    push_placed(renderer, buffer, Placed { popup: rect, element, progress: reveal, alpha }, scale, elements);
+    let shown = geometry.height.min(rect.size.h);
+    let element = Rectangle::new(Point::from((left, rect.loc.y)), Size::from((rect.size.w, shown)));
+    let placed = Placed { popup: rect, element, progress: reveal, alpha };
+    push_placed_from(renderer, buffer, placed, Some(Point::from((0, 0))), scale, elements);
 }
 
 struct QsRenderContext<'a> {
@@ -6333,19 +6374,25 @@ mod tests {
         bar.toggle_popup(OpenPopup::QuickSettings);
         assert_eq!(bar.armed_power(), None);
 
+        let settle = |bar: &mut Topbar| {
+            bar.layout_slots(&painter(), output());
+            std::thread::sleep(motion::t3() + Duration::from_millis(20));
+            bar.touch();
+            bar.layout_slots(&painter(), output());
+        };
         bar.open_detail(Detail::Wifi);
-        bar.layout_slots(&painter(), output());
-        let popup = bar.popup_rect().expect("popup");
         let page = bar.page_height(Some(&painter()), Detail::Wifi);
+        settle(&mut bar);
+        let popup = bar.popup_rect().expect("popup");
         assert_eq!(popup.size.h, page, "the page is laid out for the popup it is drawn in");
         let link = bar.slot_rect(Slot::QsDetailSettings).expect("settings link");
         assert_eq!(link.loc.y + link.size.h, popup.loc.y + popup.size.h - QS_PAD);
         bar.close_detail();
         bar.open_detail(Detail::Power);
-        bar.layout_slots(&painter(), output());
+        settle(&mut bar);
         let short = bar.popup_rect().expect("popup").size.h;
         bar.arm_power(PowerAction::Restart, vec!["Firefox".into()]);
-        bar.layout_slots(&painter(), output());
+        settle(&mut bar);
         assert!(bar.popup_rect().expect("popup").size.h > short, "the page grows with its accordion");
         bar.close_detail();
 
