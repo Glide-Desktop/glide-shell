@@ -13,7 +13,9 @@ const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 const BLUETOOTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub use glide_system::spawn::{run_with_input, run_with_timeout};
-pub use glide_topbar::qs_net::{AudioOutput, BtDevice, BtKind, ConnectError, NetEvent, Security, WifiNetwork};
+pub use glide_topbar::qs_net::{
+    AudioOutput, BtDevice, BtKind, ConnectError, NetEvent, Security, VpnConnection, VpnKind, WifiNetwork,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BtInfo {
@@ -300,6 +302,8 @@ pub enum NetRequest {
     ScanBluetooth,
     ScanOutputs,
     ScanInputs,
+    ScanVpn,
+    Vpn { name: String, up: bool },
     ConnectWifi { ssid: String, password: Option<String>, saved: bool },
     DisconnectWifi { ssid: String },
     Bluetooth { mac: String, connect: bool },
@@ -314,6 +318,8 @@ impl std::fmt::Debug for NetRequest {
             Self::ScanBluetooth => f.write_str("ScanBluetooth"),
             Self::ScanOutputs => f.write_str("ScanOutputs"),
             Self::ScanInputs => f.write_str("ScanInputs"),
+            Self::ScanVpn => f.write_str("ScanVpn"),
+            Self::Vpn { name, up } => f.debug_struct("Vpn").field("name", name).field("up", up).finish(),
             Self::UseOutput { name } => f.debug_struct("UseOutput").field("name", name).finish(),
             Self::UseInput { name } => f.debug_struct("UseInput").field("name", name).finish(),
             Self::ConnectWifi { ssid, password, saved } => f
@@ -427,6 +433,19 @@ fn run_request(request: NetRequest) {
         }
         NetRequest::ScanOutputs => emit(NetEvent::Outputs(scan_outputs())),
         NetRequest::ScanInputs => emit(NetEvent::Inputs(scan_inputs())),
+        NetRequest::ScanVpn => emit(NetEvent::Vpn(scan_vpn())),
+        NetRequest::Vpn { name, up } => {
+            let verb = if up { "up" } else { "down" };
+            let result = run_with_timeout("nmcli", &["con", verb, "id", &name], WIFI_CONNECT_TIMEOUT)
+                .filter(|output| output.status.success())
+                .map(|_| ())
+                .ok_or(ConnectError::Failed);
+            if result.is_err() {
+                tracing::info!(name, up, "switching the vpn connection failed");
+            }
+            emit(NetEvent::VpnResult { name, result });
+            emit(NetEvent::Vpn(scan_vpn()));
+        }
         NetRequest::UseOutput { name } => {
             let result = set_default("set-default-sink", &name);
             emit(NetEvent::OutputResult { name, result });
@@ -500,6 +519,31 @@ fn scan_wifi() -> Vec<WifiNetwork> {
     mark_saved(&mut networks, &saved);
     sort_networks(&mut networks);
     networks
+}
+
+#[must_use]
+pub fn parse_vpn_connections(text: &str) -> Vec<VpnConnection> {
+    let mut vpns: Vec<VpnConnection> = text
+        .lines()
+        .filter_map(|line| {
+            let fields = split_terse(line);
+            let [name, kind, active, ..] = fields.as_slice() else { return None };
+            let kind = match kind.as_str() {
+                "wireguard" => VpnKind::WireGuard,
+                "vpn" => VpnKind::Vpn,
+                _ => return None,
+            };
+            (!name.is_empty()).then(|| VpnConnection { name: name.clone(), kind, active: active == "yes" })
+        })
+        .collect();
+    vpns.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    vpns
+}
+
+fn scan_vpn() -> Vec<VpnConnection> {
+    stdout_of("nmcli", &["-t", "-f", "NAME,TYPE,ACTIVE", "con", "show"])
+        .map(|text| parse_vpn_connections(&text))
+        .unwrap_or_default()
 }
 
 fn saved_wifi_profiles() -> Vec<(String, String)> {
@@ -592,7 +636,8 @@ pub const fn scan_for(detail: Detail) -> Option<NetRequest> {
         Detail::Wifi => Some(NetRequest::ScanWifi),
         Detail::Bluetooth => Some(NetRequest::ScanBluetooth),
         Detail::Sound => Some(NetRequest::ScanOutputs),
-        Detail::Battery | Detail::Netbird | Detail::Power => None,
+        Detail::Vpn => Some(NetRequest::ScanVpn),
+        Detail::Battery | Detail::Power => None,
     }
 }
 
@@ -651,7 +696,7 @@ impl GlideState {
             PanelAction::Open(detail) => {
                 if self.topbar.open_detail(detail) {
                     scan_detail(detail);
-                    if detail == Detail::Netbird {
+                    if detail == Detail::Vpn {
                         self.netbird_request(crate::netbird::Request::Refresh);
                     }
                 }
@@ -660,6 +705,7 @@ impl GlideState {
                 self.topbar.close_detail();
             }
             PanelAction::Toggle => match self.topbar.detail() {
+                Some(Detail::Wifi) if !self.topbar.system_status().wifi_available => self.toggle_networking(),
                 Some(Detail::Wifi) => {
                     self.handle_qs_action(crate::topbar::TopbarAction::QsToggleWifi);
                     request(NetRequest::ScanWifi);
@@ -668,8 +714,7 @@ impl GlideState {
                     self.handle_qs_action(crate::topbar::TopbarAction::QsToggleBluetooth);
                     request(NetRequest::ScanBluetooth);
                 }
-                Some(Detail::Netbird) => self.toggle_netbird(),
-                Some(Detail::Battery | Detail::Sound | Detail::Power) | None => {}
+                Some(Detail::Vpn | Detail::Battery | Detail::Sound | Detail::Power) | None => {}
             },
             PanelAction::Row(index) => {
                 self.activate_detail_row(index);
@@ -688,7 +733,7 @@ impl GlideState {
                     Some(Detail::Battery) => crate::system_info::open_power_settings(),
                     Some(Detail::Bluetooth) => open_settings_panel("bluetooth"),
                     Some(Detail::Sound) => open_settings_panel("sound"),
-                    Some(Detail::Netbird) => crate::netbird::open_settings(),
+                    Some(Detail::Vpn) => open_settings_panel("vpn"),
                     _ => open_settings_panel("network"),
                 }
             }
@@ -719,28 +764,31 @@ impl GlideState {
                 self.topbar.begin_connect(&output.name);
                 request(NetRequest::UseOutput { name: output.name });
             }
-            Some(RowTarget::Netbird(row)) => self.activate_netbird_row(row),
+            Some(target @ (RowTarget::Netbird | RowTarget::Vpn(_))) => self.switch_vpn(target),
             Some(RowTarget::Output(_)) | None => {}
         }
     }
 
-    fn activate_netbird_row(&mut self, row: crate::topbar::NetbirdRow) {
-        use crate::netbird::Request;
-        use crate::topbar::NetbirdRow;
-        match row {
-            NetbirdRow::SignIn | NetbirdRow::Session { expired: true } => self.netbird_request(Request::Login),
-            NetbirdRow::Session { expired: false } => self.netbird_request(Request::Extend),
-            NetbirdRow::Profile(id) => self.netbird_request(Request::SwitchProfile(id)),
-            NetbirdRow::Exit { id, select } => self.netbird_request(Request::ExitNode { id, select }),
-            NetbirdRow::Peers => {
-                self.topbar.close_popup();
-                crate::netbird::open_settings_at(Some("peers"));
+    pub(crate) fn switch_vpn(&mut self, target: RowTarget) {
+        match target {
+            RowTarget::Netbird => self.toggle_netbird(),
+            RowTarget::Vpn(vpn) => {
+                self.topbar.begin_connect(&vpn.name);
+                request(NetRequest::Vpn { up: !vpn.active, name: vpn.name });
             }
-            NetbirdRow::Resources => {
-                self.topbar.close_popup();
-                crate::netbird::open_settings_at(Some("resources"));
-            }
+            RowTarget::Network(_) | RowTarget::Device(_) | RowTarget::Output(_) => {}
         }
+    }
+
+    pub(crate) fn toggle_vpn_tile(&mut self) {
+        if let Some(target) = self.topbar.vpn_toggle_target() {
+            self.switch_vpn(target);
+        }
+    }
+
+    pub(crate) fn refresh_quick_settings_lists() {
+        request(NetRequest::ScanVpn);
+        request(NetRequest::ScanBluetooth);
     }
 
     pub(crate) fn run_qs_field_key(&mut self, key: crate::topbar::FieldKey) {
@@ -999,10 +1047,24 @@ mod tests {
 
     #[test]
     fn pages_without_a_list_to_fetch_scan_nothing() {
-        for detail in [Detail::Battery, Detail::Power, Detail::Netbird] {
+        for detail in [Detail::Battery, Detail::Power] {
             assert!(scan_for(detail).is_none(), "{detail:?}");
         }
         assert!(matches!(scan_for(Detail::Wifi), Some(NetRequest::ScanWifi)));
+        assert!(matches!(scan_for(Detail::Vpn), Some(NetRequest::ScanVpn)));
+    }
+
+    #[test]
+    fn vpn_connections_are_the_vpn_and_wireguard_profiles_active_first() {
+        let text = "Home:802-11-wireless:yes\nOffice:wireguard:no\nProton\\: CH:vpn:yes\nLAN:802-3-ethernet:yes\n";
+        let vpns = parse_vpn_connections(text);
+        assert_eq!(
+            vpns,
+            [
+                VpnConnection { name: "Proton: CH".into(), kind: VpnKind::Vpn, active: true },
+                VpnConnection { name: "Office".into(), kind: VpnKind::WireGuard, active: false },
+            ]
+        );
     }
 
     #[test]

@@ -65,8 +65,8 @@ mod keychain_view;
 pub use tray::{ICON as TRAY_ICON, IconArt, MAX_SCALE as TRAY_MAX_SCALE, TrayButton, TrayClick, TrayIcon};
 
 pub use panels::{
-    Detail, FieldKey, NetbirdPending, NetbirdRow, NetbirdUpdate, PanelAction, PromptOutcome, QsKeyMode, RowTarget,
-    field_key, remaining_text,
+    Detail, FieldKey, NetbirdPending, NetbirdUpdate, PanelAction, PromptOutcome, QsKeyMode, RowTarget, field_key,
+    remaining_text,
 };
 
 pub const HEIGHT: i32 = 34;
@@ -142,7 +142,7 @@ const QS_ICON_BTN: i32 = 34;
 const QS_CHIP_PAD: i32 = 10;
 const QS_CONFIRM_PILL: i32 = 28;
 const QS_CONFIRM_PILL_PAD: i32 = 11;
-const QS_PAGE_MIN: i32 = 440;
+const QS_PAGE_MAX: i32 = 640;
 
 const POPUP_GAP: i32 = glide_theme::spacing::SP2;
 const SHADOW_CACHE_LIMIT: usize = 48;
@@ -299,7 +299,7 @@ pub enum TopbarAction {
     QsToggleWifi,
     QsToggleNetworking,
     QsToggleBluetooth,
-    QsToggleNetbird,
+    QsToggleVpn,
     QsToggleNightLight,
     QsToggleAirplane,
     QsToggleDarkTheme,
@@ -668,7 +668,7 @@ impl Slot {
             }
             Self::QsWifi => TopbarAction::QsToggleWifi,
             Self::QsBluetooth => TopbarAction::QsToggleBluetooth,
-            Self::QsNetbird => TopbarAction::QsToggleNetbird,
+            Self::QsNetbird => TopbarAction::QsToggleVpn,
             Self::QsNightLight => TopbarAction::QsToggleNightLight,
             Self::QsScreenshot => TopbarAction::QsScreenshot,
             Self::QsAirplane => TopbarAction::QsToggleAirplane,
@@ -689,7 +689,7 @@ impl Slot {
             Self::QsPowerCancel => TopbarAction::QsDisarmPower,
             Self::QsWifiMore => TopbarAction::QsPanel(PanelAction::Open(Detail::Wifi)),
             Self::QsBluetoothMore => TopbarAction::QsPanel(PanelAction::Open(Detail::Bluetooth)),
-            Self::QsNetbirdMore => TopbarAction::QsPanel(PanelAction::Open(Detail::Netbird)),
+            Self::QsNetbirdMore => TopbarAction::QsPanel(PanelAction::Open(Detail::Vpn)),
             Self::QsVolumeMore | Self::QsMicMore => TopbarAction::QsPanel(PanelAction::Open(Detail::Sound)),
             Self::QsBattery | Self::QsSaverMore => TopbarAction::QsPanel(PanelAction::Open(Detail::Battery)),
             Self::QsBack => TopbarAction::QsPanel(PanelAction::Back),
@@ -1385,7 +1385,9 @@ impl Topbar {
             QsTile::Network if status.wifi_available => status.wifi_enabled && !status.airplane,
             QsTile::Network => status.ethernet_connected,
             QsTile::Bluetooth => status.bluetooth_on,
-            QsTile::Vpn => self.qs_panel.netbird.tile().0 || status.vpn_active,
+            QsTile::Vpn => {
+                self.qs_panel.netbird.tile().0 || status.vpn_active || self.qs_panel.vpns().iter().any(|vpn| vpn.active)
+            }
             QsTile::Saver => status.power_profile == Some(PowerProfile::PowerSaver),
             QsTile::NightLight => status.night_light_on,
             QsTile::Dnd => self.dnd,
@@ -1739,7 +1741,7 @@ impl Topbar {
             brightness: status.brightness_available,
             battery: status.battery_pct.is_some(),
             profile: status.power_profile.is_some(),
-            vpn: self.qs_panel.netbird.installed || status.vpn_active,
+            vpn: self.qs_panel.netbird.installed || status.vpn_active || !self.qs_panel.vpns().is_empty(),
             bluetooth: status.bluetooth_available,
             network: status.wifi_available || status.ethernet_available,
             strip: qs_privacy(status).is_some(),
@@ -2576,10 +2578,6 @@ fn qs_geometry(shape: &QsShape) -> QsGeometry {
     QsGeometry { strip, volume, mic, brightness, dividers: [first, second], tiles, footer, height: y + QS_ROW + QS_PAD }
 }
 
-fn qs_page_height(main: i32) -> i32 {
-    main.max(QS_PAGE_MIN)
-}
-
 fn offset_rect(rect: LocalRect, origin: Point<i32, Logical>) -> LocalRect {
     Rectangle::new(rect.loc + origin, rect.size)
 }
@@ -2715,7 +2713,7 @@ fn push_state_layers<R: ShellRenderer>(topbar: &mut Topbar, frame: &mut Frame<'_
 struct QsLayoutInput {
     shape: QsShape,
     volume: bool,
-    detail: Option<Vec<(Slot, LocalRect)>>,
+    detail: Option<(i32, Vec<(Slot, LocalRect)>)>,
 }
 
 fn layout_qs_slots(
@@ -2724,10 +2722,10 @@ fn layout_qs_slots(
 ) -> Rectangle<i32, Logical> {
     let geometry = qs_geometry(&input.shape);
     let origin = Point::from((output.loc.x + output.size.w - PAD_X - QS_WIDTH, strip_y + HEIGHT + POPUP_GAP));
-    let height = if input.detail.is_some() { qs_page_height(geometry.height) } else { geometry.height };
+    let height = input.detail.as_ref().map_or(geometry.height, |(height, _)| *height);
     let popup = Rectangle::new(origin, Size::from((QS_WIDTH, height)));
     let mut push = |slot: Slot, rect: LocalRect| slots.push((slot, offset_rect(rect, origin)));
-    if let Some(detail) = input.detail {
+    if let Some((_, detail)) = input.detail {
         for (slot, rect) in detail {
             push(slot, rect);
         }
@@ -3993,9 +3991,7 @@ type GlyphPainter = fn(&mut [u8], i32, i32, f32, f32, i32, Color);
 
 const QS_TITLE: TextStyle = TextStyle { size_px: 14.0, line_height_px: 20.0, weight: 630, ..TextStyle::HEAD };
 const QS_TITLE_PAGE: TextStyle = QS_TITLE;
-const QS_SOFT_DIM: f32 = 0.85;
 const QS_SUB: TextStyle = TextStyle::CAP;
-const QS_LABEL: TextStyle = TextStyle { weight: 550, ..TextStyle::CAP };
 const QS_NOTE: TextStyle = TextStyle::CAP;
 const QS_STRONG: TextStyle = TextStyle { weight: 600, ..TextStyle::CAP };
 const QS_PILL_TEXT: TextStyle = TextStyle { size_px: 12.5, line_height_px: 16.0, weight: 520, ..TextStyle::CAP };
@@ -4424,8 +4420,11 @@ fn draw_qs_tiles(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, draw: &QsDraw<'_
             ),
             QsTile::Vpn => {
                 let (netbird_on, netbird_line) = draw.panel.netbird.tile();
-                let subtitle = if netbird_on {
+                let active = draw.panel.vpns().iter().find(|vpn| vpn.active);
+                let subtitle = if netbird_on || draw.panel.netbird.row().1 {
                     netbird_line.to_string()
+                } else if let Some(vpn) = active {
+                    vpn.name.clone()
                 } else if status.vpn_active {
                     t(Key::QsOnLong).to_string()
                 } else {
@@ -5822,19 +5821,29 @@ mod tests {
     }
 
     #[test]
-    fn the_netbird_tile_joins_the_grid_only_when_netbird_is_installed() {
+    fn the_vpn_tile_joins_the_grid_only_when_there_is_a_vpn() {
         let mut bar = quick_settings();
         let plain = qs_geometry(&bar.qs_shape(None)).height;
         assert!(bar.slot_rect(Slot::QsNetbird).is_none() && bar.slot_rect(Slot::QsNetbirdMore).is_none());
         bar.set_netbird_installed(true);
         bar.layout_slots(&painter(), output());
         let taller = qs_geometry(&bar.qs_shape(None)).height;
-        assert_eq!(taller - plain, QS_TILE_HEIGHT + QS_GRID_GAP, "a ninth tile opens a fifth row");
+        assert_eq!(taller - plain, QS_TILE_HEIGHT + QS_GRID_GAP, "a seventh tile opens a fourth row");
         assert!(bar.slot_rect(Slot::QsNetbird).is_some() && bar.slot_rect(Slot::QsNetbirdMore).is_some());
-        assert_eq!(Slot::QsNetbird.action(), TopbarAction::QsToggleNetbird);
-        assert_eq!(Slot::QsNetbirdMore.action(), TopbarAction::QsPanel(PanelAction::Open(Detail::Netbird)));
+        assert_eq!(Slot::QsNetbird.action(), TopbarAction::QsToggleVpn);
+        assert_eq!(Slot::QsNetbirdMore.action(), TopbarAction::QsPanel(PanelAction::Open(Detail::Vpn)));
         let (on, subtitle) = bar.qs_panel.netbird.tile();
-        assert!(!on && subtitle == crate::i18n::t(crate::i18n::Key::QsOff), "no status yet reads as off");
+        assert!(!on && subtitle == crate::i18n::t(crate::i18n::Key::QsOffLong), "no status yet reads as off");
+
+        let mut bar = quick_settings();
+        let vpn = crate::qs_net::VpnConnection {
+            name: "Office".into(),
+            kind: crate::qs_net::VpnKind::WireGuard,
+            active: false,
+        };
+        bar.apply_net_event(crate::qs_net::NetEvent::Vpn(vec![vpn]));
+        bar.layout_slots(&painter(), output());
+        assert!(bar.slot_rect(Slot::QsNetbird).is_some(), "a NetworkManager VPN is enough");
     }
 
     #[test]
@@ -6318,13 +6327,20 @@ mod tests {
         bar.toggle_popup(OpenPopup::QuickSettings);
         assert_eq!(bar.armed_power(), None);
 
-        let main = bar.popup_rect().expect("popup").size.h;
         bar.open_detail(Detail::Wifi);
         bar.layout_slots(&painter(), output());
         let popup = bar.popup_rect().expect("popup");
-        assert_eq!(popup.size.h, qs_page_height(main), "the page is laid out for the popup it is drawn in");
+        let page = bar.page_height(Some(&painter()), Detail::Wifi);
+        assert_eq!(popup.size.h, page, "the page is laid out for the popup it is drawn in");
         let link = bar.slot_rect(Slot::QsDetailSettings).expect("settings link");
         assert_eq!(link.loc.y + link.size.h, popup.loc.y + popup.size.h - QS_PAD);
+        bar.close_detail();
+        bar.open_detail(Detail::Power);
+        bar.layout_slots(&painter(), output());
+        let short = bar.popup_rect().expect("popup").size.h;
+        bar.arm_power(PowerAction::Restart, vec!["Firefox".into()]);
+        bar.layout_slots(&painter(), output());
+        assert!(bar.popup_rect().expect("popup").size.h > short, "the page grows with its accordion");
         bar.close_detail();
 
         bar.open_detail(Detail::Power);
@@ -6519,6 +6535,44 @@ mod tests {
 
     type PreviewAdjust = fn(&mut crate::system_info::SystemStatus, &mut Topbar);
 
+    fn preview_lists(bar: &mut Topbar) {
+        use crate::qs_net::{BtDevice, BtKind, NetEvent, Security, VpnConnection, VpnKind, WifiNetwork};
+        let net = |ssid: &str, security, signal, connected, saved| WifiNetwork {
+            ssid: ssid.into(),
+            security,
+            signal,
+            connected,
+            saved,
+        };
+        bar.apply_net_event(NetEvent::Wifi(vec![
+            net("Home", Security::Passphrase, 90, true, true),
+            net("Cafe Mriia", Security::Open, 60, false, false),
+            net("Neighbour", Security::Passphrase, 40, false, false),
+            net("eduroam", Security::Enterprise, 30, false, false),
+        ]));
+        let bt = |mac: &str, name: &str, kind, connected, battery| BtDevice {
+            mac: mac.into(),
+            name: name.into(),
+            kind,
+            connected,
+            battery,
+        };
+        bar.apply_net_event(NetEvent::Bluetooth(vec![
+            bt("aa", "WH-1000XM4", BtKind::Headphones, true, Some(74)),
+            bt("bb", "MX Master 3", BtKind::Mouse, false, None),
+        ]));
+        bar.apply_net_event(NetEvent::Outputs(vec![
+            device("speakers", true, "audio-speakers"),
+            device("hdmi", false, "video-display"),
+        ]));
+        bar.apply_net_event(NetEvent::Inputs(vec![device("mic", true, "audio-input-microphone")]));
+        bar.apply_net_event(NetEvent::Vpn(vec![
+            VpnConnection { name: "Office".into(), kind: VpnKind::WireGuard, active: true },
+            VpnConnection { name: "Proton".into(), kind: VpnKind::Vpn, active: false },
+        ]));
+        bar.begin_connect("Neighbour");
+    }
+
     #[test]
     #[ignore = "writes preview PNGs to $GLIDE_QS_PREVIEW"]
     fn quick_settings_preview() {
@@ -6589,18 +6643,21 @@ mod tests {
                 if name != "rest" {
                     continue;
                 }
+                preview_lists(&mut bar);
                 for (page, armed) in [
                     (Detail::Battery, None),
                     (Detail::Power, None),
                     (Detail::Power, Some(PowerAction::Restart)),
                     (Detail::Sound, None),
                     (Detail::Wifi, None),
+                    (Detail::Bluetooth, None),
+                    (Detail::Vpn, None),
                 ] {
                     bar.open_detail(page);
                     if let Some(action) = armed {
                         bar.arm_power(action, vec!["Firefox".into(), "Files".into(), "Terminal".into()]);
                     }
-                    let height = qs_page_height(qs_geometry(&bar.qs_shape(Some(&painter))).height);
+                    let height = bar.page_height(Some(&painter), page);
                     let mut canvas = Canvas::popover((QS_WIDTH, height), 2, R3, theme.popover_bg, theme.line)
                         .expect("canvas")
                         .with_icons(Some(&mut icons));

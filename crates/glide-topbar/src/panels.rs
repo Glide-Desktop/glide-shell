@@ -1,21 +1,21 @@
 use super::{
     Anim, Canvas, Color, E_OUT, GlyphPainter, LocalRect, Logical, MemoryRenderBufferRenderElement, OpenPopup, Placed,
-    Point, QS_PAD, QS_WIDTH, QsRenderContext, Rectangle, Scale, Slot, SwitchMotion, TextAlign, TextStyle, Topbar,
-    TopbarTheme, band, draw_switch, local_rect, motion, push_placed, qs_geometry, text_w,
+    Point, QS_PAD, QS_WIDTH, QsRenderContext, Rectangle, Scale, Slot, TextAlign, TextStyle, Topbar, TopbarTheme, band,
+    local_rect, motion, push_placed, text_w,
 };
 
 use crate::i18n::{Key, t};
 use crate::power::{PowerAction, is_destructive};
-use crate::qs_net::{AudioOutput, BtDevice, ConnectError, NetEvent, Security, WifiNetwork};
+use crate::qs_net::{AudioOutput, BtDevice, ConnectError, NetEvent, Security, VpnConnection, VpnKind, WifiNetwork};
 use crate::system_info::{BatteryInfo, BatteryState, PowerProfile};
 use glide_shell::field::{CaretMove, TextField};
-use glide_theme::shape::{R_ROUND, R1, R2};
+use glide_theme::shape::{R_ROUND, R1, R2, R3};
 use glide_theme::spacing::{SP1, SP2, SP3};
 use smithay::input::keyboard::Keysym;
 
 mod netbird;
 
-pub use netbird::{NetbirdPending, NetbirdRow, NetbirdUpdate, remaining_text};
+pub use netbird::{NetbirdPending, NetbirdUpdate, remaining_text};
 
 const DETAIL_BACK: i32 = 28;
 const DETAIL_BACK_ICON: i32 = 16;
@@ -36,21 +36,24 @@ const SEGMENT_ICON: i32 = 14;
 const SEGMENT_HINT: i32 = SP2 + 32 + SP1;
 const MENU_ITEM: TextStyle = TextStyle { size_px: 13.5, line_height_px: 20.0, weight: 450, ..TextStyle::CAP };
 const KEYCAP: TextStyle = TextStyle { size_px: 11.0, line_height_px: 14.0, weight: 450, ..TextStyle::NUM };
-const DETAIL_SECTION: i32 = 14;
+const DETAIL_SECTION: i32 = 28;
 const DETAIL_CARD: i32 = 48;
-const DETAIL_CARD_GAP: i32 = 6;
-const DETAIL_GROUP_GAP: i32 = SP1 + SP3 - DETAIL_CARD_GAP;
-const DETAIL_SETTINGS: i32 = 32;
+const DETAIL_CARD_GAP: i32 = 2;
+const DETAIL_GROUP_GAP: i32 = SP2 - DETAIL_CARD_GAP;
+const DETAIL_SETTINGS: i32 = 34;
 const DETAIL_CHEVRON: i32 = 14;
 const CARD_PAD_X: i32 = 10;
-const CARD_GAP: i32 = 10;
-const CARD_ICON: i32 = 24;
-const CARD_GLYPH: i32 = 14;
-const CARD_TRAILING: i32 = 12;
-const CARD_ACTION_H: i32 = 22;
-const CARD_ACTION_PAD: i32 = SP2;
-const CARD_PRIMARY: TextStyle = TextStyle { size_px: 12.5, line_height_px: 16.0, weight: 600, ..TextStyle::CAP };
-const CARD_ACTION: TextStyle = TextStyle { size_px: 11.0, line_height_px: 14.0, weight: 550, ..TextStyle::CAP };
+const ROW_PAD: i32 = SP2;
+const ROW_GAP: i32 = 12;
+const ROW_WELL: i32 = 32;
+const ROW_GLYPH: i32 = 16;
+const ROW_TAIL: i32 = 16;
+const EMPTY_WELL: i32 = 40;
+const EMPTY_PAD_TOP: i32 = 20;
+const EMPTY_PAD_BOTTOM: i32 = 24;
+const EMPTY_TEXT_LINES: usize = 2;
+const LINK_TEXT: TextStyle = TextStyle { size_px: 13.0, line_height_px: 19.0, weight: 450, ..TextStyle::CAP };
+const EMPTY_TEXT: TextStyle = LINK_TEXT;
 const PROMPT_PAD_X: i32 = 10;
 const PROMPT_PAD_TOP: i32 = SP2;
 const PROMPT_PAD_BOTTOM: i32 = 10;
@@ -67,7 +70,7 @@ pub enum Detail {
     Bluetooth,
     Battery,
     Sound,
-    Netbird,
+    Vpn,
     Power,
 }
 
@@ -123,7 +126,8 @@ pub enum RowTarget {
     Network(WifiNetwork),
     Device(BtDevice),
     Output(AudioOutput),
-    Netbird(NetbirdRow),
+    Netbird,
+    Vpn(VpnConnection),
 }
 
 #[derive(PartialEq, Eq)]
@@ -200,7 +204,7 @@ pub(super) const fn more_slot(detail: Detail) -> Slot {
         Detail::Bluetooth => Slot::QsBluetoothMore,
         Detail::Battery => Slot::QsBattery,
         Detail::Sound => Slot::QsVolumeMore,
-        Detail::Netbird => Slot::QsNetbirdMore,
+        Detail::Vpn => Slot::QsNetbirdMore,
         Detail::Power => Slot::QsPowerMenu,
     }
 }
@@ -341,6 +345,7 @@ pub(super) struct DetailPanel {
     outputs: Vec<AudioOutput>,
     outputs_ready: bool,
     inputs: Option<Vec<AudioOutput>>,
+    vpn_list: Option<Vec<VpnConnection>>,
     sound_scroll: usize,
     list_scroll: usize,
     pending: Option<Pending>,
@@ -355,6 +360,10 @@ pub(super) struct DetailPanel {
 impl DetailPanel {
     pub(super) const fn bump(&mut self) {
         self.rev = self.rev.wrapping_add(1);
+    }
+
+    pub(super) fn vpns(&self) -> &[VpnConnection] {
+        self.vpn_list.as_deref().unwrap_or_default()
     }
 
     fn status_for(&self, key: &str) -> RowStatus {
@@ -428,9 +437,76 @@ impl DetailPanel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyIcon {
+    Airplane,
+    WifiOff,
+    Wifi,
+    Bluetooth,
+    Vpn,
+}
+
+impl EmptyIcon {
+    fn symbol(self) -> (&'static str, GlyphPainter) {
+        match self {
+            Self::Airplane => ("airplane-mode", crate::paint::draw_wifi_waves_glyph_over),
+            Self::WifiOff => ("network-wireless-offline", crate::paint::draw_wifi_waves_glyph_over),
+            Self::Wifi => ("network-wireless", crate::paint::draw_wifi_waves_glyph_over),
+            Self::Bluetooth => ("bluetooth-disabled", crate::paint::draw_bluetooth_glyph_over),
+            Self::Vpn => ("network-vpn", crate::paint::draw_lock_glyph_over),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Empty {
+    icon: EmptyIcon,
+    title: Key,
+    text: Option<Key>,
+}
+
+impl Empty {
+    const fn wifi_off(airplane: bool) -> Self {
+        if airplane {
+            Self { icon: EmptyIcon::Airplane, title: Key::QsAirplaneOnTitle, text: Some(Key::QsAirplaneOnText) }
+        } else {
+            Self { icon: EmptyIcon::WifiOff, title: Key::QsWifiOffTitle, text: Some(Key::QsWifiOffText) }
+        }
+    }
+
+    const fn bluetooth_off(airplane: bool) -> Self {
+        let title = if airplane { Key::QsAirplaneOnTitle } else { Key::QsBluetoothOffTitle };
+        Self { icon: EmptyIcon::Bluetooth, title, text: Some(Key::QsBluetoothOffText) }
+    }
+
+    const fn note(icon: EmptyIcon, title: Key) -> Self {
+        Self { icon, title, text: None }
+    }
+}
+
+fn empty_height(painter: Option<&crate::paint::Painter>, empty: Empty, width: i32) -> i32 {
+    let lines = match (painter, empty.text) {
+        (_, None) => 0,
+        (None, Some(_)) => EMPTY_TEXT_LINES,
+        (Some(painter), Some(text)) => {
+            crate::notifications::wrap_lines(painter, t(text), &EMPTY_TEXT, width - SP3 * 2, EMPTY_TEXT_LINES).len()
+        }
+    };
+    let text = i32::try_from(lines).unwrap_or(2) * EMPTY_TEXT.line_height_px as i32;
+    let gap = if lines > 0 { SP1 } else { 0 };
+    EMPTY_PAD_TOP + EMPTY_WELL + SP2 + SP1 + super::QS_TITLE.line_height_px as i32 + gap + text + EMPTY_PAD_BOTTOM
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ItemKind {
     Section(Key),
     Message(Key),
+    Empty(Empty),
+    Ethernet,
+    Separator,
+    Airplane,
+    VpnNetbird,
+    Vpn(usize),
+    MicSlider,
     Network(usize),
     Device(usize),
     Output(usize),
@@ -441,9 +517,7 @@ pub(super) enum ItemKind {
     Segment(PowerProfile),
     SegmentsHint,
     PowerRow(PowerAction),
-    PowerSeparator,
     PowerConfirm(PowerAction),
-    Netbird(netbird::NbItem),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,16 +620,8 @@ impl Column<'_> {
         true
     }
 
-    fn section_over_card(&mut self, key: Key) -> bool {
-        self.fits(DETAIL_SECTION + SP3 + DETAIL_CARD) && self.section(key)
-    }
-
     fn section(&mut self, key: Key) -> bool {
-        let pushed = self.push(ItemKind::Section(key), DETAIL_SECTION, None);
-        if pushed {
-            self.y += SP3;
-        }
-        pushed
+        self.push(ItemKind::Section(key), DETAIL_SECTION, None)
     }
 
     fn card(&mut self, kind: ItemKind, slot: Option<Slot>) -> bool {
@@ -568,6 +634,11 @@ impl Column<'_> {
 
     fn message(&mut self, key: Key) {
         self.card(ItemKind::Message(key), None);
+    }
+
+    fn empty(&mut self, empty: Empty, painter: Option<&crate::paint::Painter>) {
+        let height = empty_height(painter, empty, self.width);
+        self.push(ItemKind::Empty(empty), height, None);
     }
 
     const fn end_group(&mut self) {
@@ -598,68 +669,83 @@ fn push_network(column: &mut Column<'_>, panel: &DetailPanel, index: usize) -> b
     true
 }
 
-fn wifi_items(column: &mut Column<'_>, panel: &DetailPanel, status: &crate::system_info::SystemStatus) {
-    if !status.wifi_enabled {
-        return column.message(Key::QsWifiIsOff);
+const AIRPLANE_BLOCK: i32 = MENU_SEP + DETAIL_CARD;
+const PAGE_PROBE: i32 = 4096;
+
+fn wifi_items(
+    column: &mut Column<'_>, panel: &DetailPanel, status: &crate::system_info::SystemStatus,
+    painter: Option<&crate::paint::Painter>,
+) {
+    if status.ethernet_available {
+        column.section(Key::QsWired);
+        column.card(ItemKind::Ethernet, None);
+        column.end_group();
+    }
+    if !status.wifi_available {
+        return;
+    }
+    let bottom = column.bottom;
+    column.bottom -= AIRPLANE_BLOCK;
+    wifi_list(column, panel, status, painter);
+    column.bottom = bottom;
+    column.push(ItemKind::Separator, MENU_SEP, None);
+    column.push(ItemKind::Airplane, DETAIL_CARD, Some(Slot::QsAirplane));
+}
+
+fn wifi_list(
+    column: &mut Column<'_>, panel: &DetailPanel, status: &crate::system_info::SystemStatus,
+    painter: Option<&crate::paint::Painter>,
+) {
+    if !status.wifi_enabled || status.airplane {
+        return column.empty(Empty::wifi_off(status.airplane), painter);
+    }
+    if !column.section(Key::WiFi) {
+        return;
     }
     if panel.wifi.is_empty() {
-        return column.message(if panel.wifi_ready { Key::QsNoNetworks } else { Key::QsSearching });
+        let title = if panel.wifi_ready { Key::QsNoNetworks } else { Key::QsSearching };
+        return column.empty(Empty::note(EmptyIcon::Wifi, title), painter);
     }
     let (connected, available): (Vec<usize>, Vec<usize>) =
         (0..panel.wifi.len()).partition(|index| panel.wifi[*index].connected);
-    let mut skipped = panel.list_scroll.min(panel.wifi.len().saturating_sub(1));
-    for (key, group) in [(Key::QsConnectedNetwork, connected), (Key::QsAvailableNetworks, available)] {
-        if skipped >= group.len() {
-            skipped -= group.len();
-            continue;
-        }
-        if !column.section(key) {
+    let skipped = panel.list_scroll.min(panel.wifi.len().saturating_sub(1));
+    for index in connected.into_iter().chain(available).skip(skipped) {
+        if !push_network(column, panel, index) {
             return;
         }
-        for index in group.into_iter().skip(skipped) {
-            if !push_network(column, panel, index) {
-                return;
-            }
-        }
-        skipped = 0;
-        column.end_group();
     }
 }
 
-fn bluetooth_items(column: &mut Column<'_>, panel: &DetailPanel, status: &crate::system_info::SystemStatus) {
+fn bluetooth_items(
+    column: &mut Column<'_>, panel: &DetailPanel, status: &crate::system_info::SystemStatus,
+    painter: Option<&crate::paint::Painter>,
+) {
     if !status.bluetooth_on {
-        return column.message(Key::QsBluetoothIsOff);
+        return column.empty(Empty::bluetooth_off(status.airplane), painter);
+    }
+    if !column.section(Key::QsDevicesSection) {
+        return;
     }
     if panel.devices.is_empty() {
-        return column.message(if panel.devices_ready { Key::QsNoDevices } else { Key::QsSearching });
+        let title = if panel.devices_ready { Key::QsNoDevices } else { Key::QsSearching };
+        return column.empty(Empty::note(EmptyIcon::Bluetooth, title), painter);
     }
     let (connected, paired): (Vec<usize>, Vec<usize>) =
         (0..panel.devices.len()).partition(|index| panel.devices[*index].connected);
-    let mut skipped = panel.list_scroll.min(panel.devices.len().saturating_sub(1));
-    for (key, group) in [(Key::QsConnectedDevices, connected), (Key::QsPairedDevices, paired)] {
-        if skipped >= group.len() {
-            skipped -= group.len();
-            continue;
-        }
-        if !column.section(key) {
+    let skipped = panel.list_scroll.min(panel.devices.len().saturating_sub(1));
+    for index in connected.into_iter().chain(paired).skip(skipped) {
+        if !column.card(ItemKind::Device(index), row_slot(index)) {
             return;
         }
-        for index in group.into_iter().skip(skipped) {
-            if !column.card(ItemKind::Device(index), row_slot(index)) {
-                return;
-            }
-        }
-        skipped = 0;
-        column.end_group();
     }
 }
 
-fn sound_items(column: &mut Column<'_>, panel: &DetailPanel) {
+fn sound_items(column: &mut Column<'_>, panel: &DetailPanel, mic: bool) {
     let count = panel.outputs.len() + panel.inputs.as_ref().map_or(0, Vec::len);
     let mut skipped = panel.sound_scroll.min(count.saturating_sub(1));
     let groups = [
-        (Key::QsOutputDevice, super::Drawer::Output, Key::QsNoOutputs),
-        (Key::QsInputDevice, super::Drawer::Input, Key::QsNoInputs),
+        (Key::QsOutputSection, super::Drawer::Output, Key::QsNoOutputs),
+        (Key::QsInputSection, super::Drawer::Input, Key::QsNoInputs),
     ];
     for (section, drawer, empty) in groups {
         let devices = panel.devices(drawer);
@@ -686,6 +772,14 @@ fn sound_items(column: &mut Column<'_>, panel: &DetailPanel) {
         }
         skipped = 0;
         column.end_group();
+    }
+    if mic {
+        column.y += SP1 - DETAIL_GROUP_GAP - DETAIL_CARD_GAP;
+        let row = super::qs_slider_row(column.left, column.y, column.width, true);
+        if column.push(ItemKind::MicSlider, super::QS_ROW, None) {
+            column.items.push(DetailItem { kind: ItemKind::MicSlider, rect: row.icon, slot: Some(Slot::QsMicMute) });
+            column.items.push(DetailItem { kind: ItemKind::MicSlider, rect: row.track, slot: Some(Slot::QsMicTrack) });
+        }
     }
 }
 
@@ -730,7 +824,7 @@ pub(super) fn confirm_height(painter: Option<&crate::paint::Painter>, apps: &[St
 fn power_items(column: &mut Column<'_>, panel: &DetailPanel, painter: Option<&crate::paint::Painter>) {
     for action in POWER_ROWS {
         if action == PowerAction::LogOut {
-            column.push(ItemKind::PowerSeparator, MENU_SEP, None);
+            column.push(ItemKind::Separator, MENU_SEP, None);
         }
         column.push(ItemKind::PowerRow(action), MENU_ROW, Some(Slot::QsPowerButton(action)));
         if panel.armed == Some(action) && is_destructive(action) {
@@ -753,27 +847,46 @@ pub(super) fn detail_items(
         items: &mut items,
     };
     match detail {
-        Detail::Wifi => wifi_items(&mut column, panel, status),
-        Detail::Bluetooth => bluetooth_items(&mut column, panel, status),
-        Detail::Sound => sound_items(&mut column, panel),
+        Detail::Wifi => wifi_items(&mut column, panel, status, painter),
+        Detail::Bluetooth => bluetooth_items(&mut column, panel, status, painter),
+        Detail::Sound => sound_items(&mut column, panel, status.mic_available),
         Detail::Battery => battery_items(&mut column, status),
-        Detail::Netbird => netbird::items(&mut column, &panel.netbird),
+        Detail::Vpn => vpn_items(&mut column, panel, painter),
         Detail::Power => power_items(&mut column, panel, painter),
     }
     items
 }
 
-fn radio_on(detail: Detail, panel: &DetailPanel, status: &crate::system_info::SystemStatus) -> bool {
+fn vpn_items(column: &mut Column<'_>, panel: &DetailPanel, painter: Option<&crate::paint::Painter>) {
+    let netbird = usize::from(panel.netbird.installed);
+    if netbird + panel.vpns().len() == 0 {
+        let title = if panel.vpn_list.is_some() { Key::QsNoVpn } else { Key::QsSearching };
+        return column.empty(Empty::note(EmptyIcon::Vpn, title), painter);
+    }
+    if !column.section(Key::QsVpnSection) {
+        return;
+    }
+    if netbird == 1 && !column.card(ItemKind::VpnNetbird, row_slot(0)) {
+        return;
+    }
+    for index in 0..panel.vpns().len() {
+        if !column.card(ItemKind::Vpn(index), row_slot(index + netbird)) {
+            return;
+        }
+    }
+}
+
+fn radio_on(detail: Detail, _panel: &DetailPanel, status: &crate::system_info::SystemStatus) -> bool {
     match detail {
-        Detail::Wifi => status.wifi_enabled,
+        Detail::Wifi if status.wifi_available => status.wifi_enabled && !status.airplane,
+        Detail::Wifi => status.ethernet_connected,
         Detail::Bluetooth => status.bluetooth_on,
-        Detail::Netbird => panel.netbird.switched_on(),
-        Detail::Battery | Detail::Sound | Detail::Power => false,
+        Detail::Vpn | Detail::Battery | Detail::Sound | Detail::Power => false,
     }
 }
 
 const fn has_radio(detail: Detail) -> bool {
-    matches!(detail, Detail::Wifi | Detail::Bluetooth | Detail::Netbird)
+    matches!(detail, Detail::Wifi | Detail::Bluetooth)
 }
 
 const fn has_link(detail: Detail) -> bool {
@@ -856,6 +969,18 @@ impl Topbar {
     }
 
     #[must_use]
+    pub fn vpn_toggle_target(&self) -> Option<RowTarget> {
+        let panel = &self.qs_panel;
+        if let Some(active) = panel.vpns().iter().find(|vpn| vpn.active) {
+            return Some(RowTarget::Vpn(active.clone()));
+        }
+        if panel.netbird.installed {
+            return Some(RowTarget::Netbird);
+        }
+        panel.vpns().first().cloned().map(RowTarget::Vpn)
+    }
+
+    #[must_use]
     pub fn detail_row(&self, index: u16) -> Option<RowTarget> {
         let index = usize::from(index);
         match self.detail()? {
@@ -863,7 +988,14 @@ impl Topbar {
             Detail::Bluetooth => self.qs_panel.devices.get(index).cloned().map(RowTarget::Device),
             Detail::Sound => self.qs_panel.outputs.get(index).cloned().map(RowTarget::Output),
             Detail::Battery | Detail::Power => None,
-            Detail::Netbird => netbird::row(&self.qs_panel.netbird, u16::try_from(index).ok()?).map(RowTarget::Netbird),
+            Detail::Vpn => {
+                let netbird = usize::from(self.qs_panel.netbird.installed);
+                if index < netbird {
+                    Some(RowTarget::Netbird)
+                } else {
+                    self.qs_panel.vpns().get(index - netbird).cloned().map(RowTarget::Vpn)
+                }
+            }
         }
     }
 
@@ -884,7 +1016,11 @@ impl Topbar {
                 .position(|o| o.name == key)
                 .and_then(row)
                 .or_else(|| self.device_slot_for(super::Drawer::Input, key)),
-            Some(Detail::Battery | Detail::Netbird | Detail::Power) | None => None,
+            Some(Detail::Vpn) => {
+                let netbird = usize::from(self.qs_panel.netbird.installed);
+                row(self.qs_panel.vpns().iter().position(|vpn| vpn.name == key)? + netbird)
+            }
+            Some(Detail::Battery | Detail::Power) | None => None,
         }
     }
 
@@ -1017,6 +1153,13 @@ impl Topbar {
 
     pub fn apply_net_event(&mut self, event: NetEvent) -> bool {
         match event {
+            NetEvent::Vpn(vpns) => {
+                if self.qs_panel.vpn_list.as_ref() == Some(&vpns) {
+                    return false;
+                }
+                self.qs_panel.vpn_list = Some(vpns);
+            }
+            NetEvent::VpnResult { name, result } => self.settle_pending(&name, result),
             NetEvent::Wifi(networks) => {
                 if self.qs_panel.wifi_ready && self.qs_panel.wifi == networks {
                     return false;
@@ -1061,10 +1204,18 @@ impl Topbar {
         true
     }
 
-    pub(super) fn detail_slots(&self, painter: &crate::paint::Painter) -> Option<Vec<(Slot, LocalRect)>> {
+    pub(super) fn page_height(&self, painter: Option<&crate::paint::Painter>, detail: Detail) -> i32 {
+        let probe = detail_geometry(PAGE_PROBE, has_radio(detail), has_link(detail));
+        let items = detail_items(&self.qs_panel, detail, &self.system_status, probe.body, painter);
+        let bottom = items.iter().map(|item| item.rect.loc.y + item.rect.size.h).max().unwrap_or(probe.body.loc.y);
+        let below = PAGE_PROBE - (probe.body.loc.y + probe.body.size.h);
+        (bottom + below).min(super::QS_PAGE_MAX)
+    }
+
+    pub(super) fn detail_slots(&self, painter: &crate::paint::Painter) -> Option<(i32, Vec<(Slot, LocalRect)>)> {
         let detail = self.qs_panel.view?;
         let radio = has_radio(detail);
-        let height = super::qs_page_height(qs_geometry(&self.qs_shape(None)).height);
+        let height = self.page_height(Some(painter), detail);
         let geometry = detail_geometry(height, radio, has_link(detail));
         let mut slots = vec![(Slot::QsBack, geometry.back)];
         if radio {
@@ -1090,7 +1241,7 @@ impl Topbar {
         if has_link(detail) {
             slots.push((Slot::QsDetailSettings, geometry.settings));
         }
-        Some(slots)
+        Some((height, slots))
     }
 }
 
@@ -1101,7 +1252,7 @@ fn prompt_pills(painter: &crate::paint::Painter) -> (i32, i32) {
     )
 }
 
-pub(super) type DetailKey = (u64, u64, Option<Slot>, Detail, i32, u8);
+pub(super) type DetailKey = ((u64, u64, u64), Option<Slot>, Detail, i32, u8);
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_detail<R>(
@@ -1120,7 +1271,8 @@ pub(super) fn push_detail<R>(
     }
     let hovered = topbar.hovered_in(Slot::in_quick_settings).filter(|_| topbar.qs_panel.view.is_some());
     let profile = super::quantize(topbar.profile_anim.value(), super::MOTION_QUANTUM);
-    let key: DetailKey = (topbar.qs_panel.rev, topbar.detail_rev, hovered, detail, rect.size.h, profile);
+    let revs = (topbar.qs_panel.rev, topbar.detail_rev, topbar.status_rev);
+    let key: DetailKey = (revs, hovered, detail, rect.size.h, profile);
     let theme = &topbar.theme;
     let status = &topbar.system_status;
     let panel = &topbar.qs_panel;
@@ -1176,23 +1328,27 @@ pub(super) fn draw_detail(
     c.fill(local_rect(QS_PAD, geometry.divider_bottom, c.w - QS_PAD * 2, 1), ctx.theme.line, 0.0);
     let settings = geometry.settings;
     let settings_label = t(match detail {
-        Detail::Wifi => Key::QsWifiSettings,
-        Detail::Bluetooth => Key::QsBluetoothSettings,
-        Detail::Battery | Detail::Power => Key::TbBatterySettings,
-        Detail::Sound => Key::QsSoundSettings,
-        Detail::Netbird => Key::NbSettings,
+        Detail::Wifi => Key::QsLinkNetwork,
+        Detail::Bluetooth => Key::QsLinkBluetooth,
+        Detail::Battery | Detail::Power => Key::QsLinkPower,
+        Detail::Sound => Key::QsLinkSound,
+        Detail::Vpn => Key::QsLinkVpn,
     });
     let (left, right, top, bottom) = band(settings);
-    let chevron = local_rect(right - SP2 - DETAIL_CHEVRON, top, DETAIL_CHEVRON, settings.size.h);
-    c.text(
-        ctx.painter,
-        (left + SP2, chevron.loc.x - SP2, top, bottom),
-        TextAlign::Left,
-        settings_label,
-        ctx.theme.label,
-        &super::QS_LABEL,
+    let theme = ctx.theme;
+    let icon = local_rect(left + CARD_PAD_X, top + (settings.size.h - MENU_ICON) / 2, MENU_ICON, MENU_ICON);
+    super::qs_symbol(c, icon, ("emblem-system", crate::paint::draw_gear_glyph_over), MENU_ICON, theme.muted);
+    let ext = local_rect(
+        right - CARD_PAD_X - DETAIL_CHEVRON,
+        top + (settings.size.h - DETAIL_CHEVRON) / 2,
+        DETAIL_CHEVRON,
+        DETAIL_CHEVRON,
     );
-    super::draw_qs_chevron(c, ctx, chevron, ctx.theme.faint);
+    if !c.icon("external-link", DETAIL_CHEVRON, (ext.loc.x, ext.loc.y), theme.faint) {
+        c.text_in(ctx.painter, ext, TextAlign::Center, "\u{2197}", theme.faint, &TextStyle::CAP);
+    }
+    let text = (icon.loc.x + MENU_ICON + CARD_PAD_X, ext.loc.x - SP2, top, bottom);
+    c.text(ctx.painter, text, TextAlign::Left, settings_label, theme.muted, &LINK_TEXT);
 }
 
 fn draw_item(
@@ -1202,15 +1358,21 @@ fn draw_item(
     let rect = item.rect;
     match item.kind {
         ItemKind::Section(key) => {
-            c.text_in(ctx.painter, rect, TextAlign::Left, t(key), ctx.theme.faint, &TextStyle::MICRO);
+            let label = local_rect(rect.loc.x + SP2, rect.loc.y, rect.size.w - SP2 * 2, rect.size.h);
+            c.text_in(ctx.painter, label, TextAlign::Left, t(key), ctx.theme.faint, &TextStyle::MICRO);
         }
         ItemKind::Message(key) => {
             c.text_in(ctx.painter, rect, TextAlign::Center, t(key), ctx.theme.faint, &TextStyle::CAP);
         }
+        ItemKind::Empty(empty) => draw_empty(c, ctx, rect, empty),
+        ItemKind::Ethernet => draw_ethernet_row(c, ctx, rect, status),
+        ItemKind::Separator => {
+            c.fill(local_rect(rect.loc.x, rect.loc.y + SP1, rect.size.w, 1), ctx.theme.line, 0.0);
+        }
+        ItemKind::Airplane => draw_airplane_row(c, ctx, rect, status.airplane),
         ItemKind::Network(index) => {
             if let Some(network) = panel.wifi.get(index) {
-                let open = panel.prompt.as_ref().is_some_and(|prompt| prompt.ssid == network.ssid);
-                draw_network_card(c, ctx, rect, network, (panel.status_for(&network.ssid), open));
+                draw_network_row(c, ctx, rect, network, panel.status_for(&network.ssid));
             }
         }
         ItemKind::Prompt(index) => {
@@ -1220,19 +1382,20 @@ fn draw_item(
         }
         ItemKind::Device(index) => {
             if let Some(device) = panel.devices.get(index) {
-                draw_device_card(c, ctx, rect, device, panel.status_for(&device.mac));
+                draw_device_row(c, ctx, rect, device, panel.status_for(&device.mac));
             }
         }
         ItemKind::Output(index) | ItemKind::Input(index) => {
             let drawer =
                 if matches!(item.kind, ItemKind::Output(_)) { super::Drawer::Output } else { super::Drawer::Input };
             if let Some(device) = panel.devices(drawer).get(index) {
-                draw_audio_card(c, ctx, rect, device, panel.status_for(&device.name));
+                draw_audio_row(c, ctx, rect, device, panel.status_for(&device.name));
             }
         }
+        ItemKind::MicSlider if item.slot.is_none() => draw_mic_slider(c, ctx, rect, status),
         ItemKind::BatteryHero => draw_battery_hero(c, ctx, rect, status),
         ItemKind::Segments => draw_segments(c, ctx, rect, (status.power_profile, profile)),
-        ItemKind::Segment(_) => {}
+        ItemKind::Segment(_) | ItemKind::MicSlider => {}
         ItemKind::SegmentsHint => {
             if let Some(active) = status.power_profile {
                 let lines = crate::notifications::wrap_lines(
@@ -1251,11 +1414,13 @@ fn draw_item(
             }
         }
         ItemKind::PowerRow(action) => draw_power_row(c, ctx, rect, action, panel.armed == Some(action)),
-        ItemKind::PowerSeparator => {
-            c.fill(local_rect(rect.loc.x, rect.loc.y + SP1, rect.size.w, 1), ctx.theme.line, 0.0);
-        }
         ItemKind::PowerConfirm(action) => draw_power_confirm(c, ctx, rect, action, &panel.apps),
-        ItemKind::Netbird(item) => netbird::draw(c, ctx, rect, item, &panel.netbird),
+        ItemKind::VpnNetbird => draw_netbird_row(c, ctx, rect, &panel.netbird),
+        ItemKind::Vpn(index) => {
+            if let Some(vpn) = panel.vpns().get(index) {
+                draw_vpn_row(c, ctx, rect, vpn, panel.status_for(&vpn.name));
+            }
+        }
     }
 }
 
@@ -1298,18 +1463,12 @@ fn draw_battery_hero(
     );
     let text_left = left + pct_w + SP3;
     let text_right = cell.body.loc.x - SP3;
-    let name_h = CARD_PRIMARY.line_height_px as i32;
+    let name_h = super::QS_TITLE.line_height_px as i32;
     let sub_h = super::QS_NOTE.line_height_px as i32;
     let text_top = top + (line_h - name_h - sub_h) / 2;
     let state = t(if status.battery_charging { Key::TbBatteryCharging } else { Key::TbBatteryOnBattery });
-    c.text(
-        ctx.painter,
-        (text_left, text_right, text_top, text_top + name_h),
-        TextAlign::Left,
-        state,
-        theme.label,
-        &CARD_PRIMARY,
-    );
+    let name_band = (text_left, text_right, text_top, text_top + name_h);
+    c.text(ctx.painter, name_band, TextAlign::Left, state, theme.label, &super::QS_TITLE);
     let line = battery_head_line(status);
     let band = (text_left, text_right, text_top + name_h, text_top + name_h + sub_h);
     c.text(ctx.painter, band, TextAlign::Left, &line, theme.muted, &super::QS_NOTE);
@@ -1419,28 +1578,16 @@ fn draw_detail_header(
         Detail::Bluetooth => Key::Bluetooth,
         Detail::Battery => Key::QsBatteryTitle,
         Detail::Sound => Key::SettingsSound,
-        Detail::Netbird => Key::QsVpn,
+        Detail::Vpn => Key::QsVpn,
         Detail::Power => Key::QsPowerTitle,
     });
     let top = QS_PAD;
     let bottom = top + DETAIL_HEAD;
     let title_band = (geometry.title_left, geometry.title_right, top, bottom);
     c.text(ctx.painter, title_band, TextAlign::Left, title, theme.label, &super::QS_TITLE_PAGE);
-    if !has_radio(detail) {
-        if detail == Detail::Sound {
-            let text = if status.volume_muted {
-                t(Key::QsMutedShort).to_string()
-            } else {
-                super::qs_percent(status.volume_pct)
-            };
-            let pct_band = (geometry.title_right + SP2, QS_WIDTH - QS_PAD, top, bottom);
-            c.text(ctx.painter, pct_band, TextAlign::Right, &text, theme.muted, &super::QS_READOUT);
-        }
-        return;
+    if has_radio(detail) {
+        draw_page_switch(c, theme, geometry.toggle, radio_on(detail, panel, status));
     }
-    let position = f64::from(u8::from(radio_on(detail, panel, status)));
-    let switch = SwitchMotion { thumb: position, track: position };
-    draw_switch(c, theme, geometry.toggle, (DETAIL_SWITCH_INSET, DETAIL_SWITCH_THUMB), switch);
 }
 
 const fn profile_hint(profile: PowerProfile) -> Key {
@@ -1451,117 +1598,119 @@ const fn profile_hint(profile: PowerProfile) -> Key {
     }
 }
 
-fn status_trailing(theme: &TopbarTheme, status: RowStatus) -> Option<(String, Color)> {
+fn status_subtitle(theme: &TopbarTheme, status: RowStatus) -> Option<(String, Color)> {
     let (key, danger) = match status {
         RowStatus::Idle => return None,
-        RowStatus::Connecting => (Key::Connecting, false),
-        RowStatus::Disconnecting => (Key::QsDisconnecting, false),
-        RowStatus::Failed(ConnectError::WrongPassword) => (Key::QsWrongPassword, true),
+        RowStatus::Connecting => (Key::QsRowConnecting, false),
+        RowStatus::Disconnecting => (Key::QsRowDisconnecting, false),
+        RowStatus::Failed(ConnectError::WrongPassword) => (Key::QsRowWrongPassword, true),
         RowStatus::Failed(ConnectError::Failed) => (Key::QsCouldNotConnect, true),
     };
     let colour = if danger { theme.danger } else { theme.muted };
     Some((t(key).to_string(), colour))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Trailing {
-    Nothing,
-    Tick,
-    Chevron,
-    Lock { open: bool },
+const fn busy(status: RowStatus) -> bool {
+    matches!(status, RowStatus::Connecting | RowStatus::Disconnecting)
 }
 
-struct CardSpec<'a> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tail {
+    Nothing,
+    Check,
+    Lock,
+    External,
+    Busy,
+    Switch(bool),
+}
+
+struct RowSpec<'a> {
     icon: &'a str,
     glyph: GlyphPainter,
     title: &'a str,
     subtitle: (String, Option<Color>),
-    active: bool,
-    action: Option<&'a str>,
-    trailing: Trailing,
+    on: bool,
+    tail: Tail,
 }
 
-fn card_background(c: &mut Canvas<'_>, theme: &TopbarTheme, rect: LocalRect, active: bool) {
-    if active {
-        c.fill(rect, theme.active_soft, R2);
-    } else {
-        c.fill(rect, theme.track_soft, R2);
-        c.stroke(rect, 1.0, R2, theme.line);
-    }
+fn draw_spinner(c: &mut Canvas<'_>, theme: &TopbarTheme, rect: LocalRect) {
+    c.stroke(rect, 2.0, R_ROUND, theme.track);
+    let arc = local_rect(rect.loc.x + rect.size.w / 2 - 1, rect.loc.y, 2, 2);
+    c.fill(arc, theme.active_background, R_ROUND);
 }
 
-fn draw_card(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, spec: &CardSpec<'_>) {
+fn draw_row(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, spec: &RowSpec<'_>) {
     let theme = ctx.theme;
-    let well = local_rect(rect.loc.x + CARD_PAD_X, rect.loc.y + (rect.size.h - CARD_ICON) / 2, CARD_ICON, CARD_ICON);
+    if spec.on {
+        c.fill(rect, theme.active_soft, R2);
+    }
+    let well = local_rect(rect.loc.x + ROW_PAD, rect.loc.y + (rect.size.h - ROW_WELL) / 2, ROW_WELL, ROW_WELL);
     let (fill, symbol) =
-        if spec.active { (theme.active_background, theme.active_label) } else { (theme.fill_2, theme.muted) };
-    c.fill(well, fill, R1);
-    super::qs_symbol(c, well, (spec.icon, spec.glyph), CARD_GLYPH, symbol);
+        if spec.on { (theme.active_background, theme.active_label) } else { (theme.track_soft, theme.muted) };
+    c.fill(well, fill, R2);
+    super::qs_symbol(c, well, (spec.icon, spec.glyph), ROW_GLYPH, symbol);
 
-    let mut right = rect.loc.x + rect.size.w - CARD_PAD_X;
+    let mut right = rect.loc.x + rect.size.w - ROW_PAD;
     let centre_y = rect.loc.y + rect.size.h / 2;
-    let accent = if spec.active { theme.active_soft_label } else { theme.faint };
-    if let Some(action) = spec.action {
-        let width = text_w(ctx.painter, action, &CARD_ACTION) + CARD_ACTION_PAD * 2;
-        let button = local_rect(right - width, centre_y - CARD_ACTION_H / 2, width, CARD_ACTION_H);
-        c.fill(button, theme.fill_2, R1);
-        c.text_in(ctx.painter, button, TextAlign::Center, action, theme.muted, &CARD_ACTION);
-        right = button.loc.x - CARD_GAP;
+    let tail_ink = if spec.on { theme.active_soft_label } else { theme.faint };
+    let tail = local_rect(right - ROW_TAIL, centre_y - ROW_TAIL / 2, ROW_TAIL, ROW_TAIL);
+    match spec.tail {
+        Tail::Nothing => {}
+        Tail::Check => {
+            super::qs_symbol(c, tail, ("object-select", crate::paint::draw_tick_glyph_over), ROW_TAIL, tail_ink);
+        }
+        Tail::Lock => {
+            let lock = ("network-wireless-encrypted", crate::paint::draw_lock_glyph_over as GlyphPainter);
+            super::qs_symbol(c, tail, lock, ROW_TAIL, tail_ink);
+        }
+        Tail::External => {
+            if !c.icon("external-link", ROW_TAIL, (tail.loc.x, tail.loc.y), tail_ink) {
+                c.text_in(ctx.painter, tail, TextAlign::Center, "\u{2197}", tail_ink, &TextStyle::CAP);
+            }
+        }
+        Tail::Busy => draw_spinner(c, theme, tail),
+        Tail::Switch(on) => {
+            let switch =
+                local_rect(right - DETAIL_SWITCH_W, centre_y - DETAIL_SWITCH_H / 2, DETAIL_SWITCH_W, DETAIL_SWITCH_H);
+            draw_page_switch(c, theme, switch, on);
+            right = switch.loc.x - ROW_GAP;
+        }
     }
-    match spec.trailing {
-        Trailing::Nothing => {}
-        Trailing::Tick => {
-            let tick = local_rect(right - CARD_TRAILING, centre_y - CARD_TRAILING / 2, CARD_TRAILING, CARD_TRAILING);
-            super::qs_symbol(c, tick, ("object-select", crate::paint::draw_tick_glyph_over), CARD_TRAILING, accent);
-            right = tick.loc.x - CARD_GAP;
-        }
-        Trailing::Chevron => {
-            let chevron = local_rect(right - CARD_TRAILING, centre_y - CARD_TRAILING / 2, CARD_TRAILING, CARD_TRAILING);
-            if !c.icon("go-next", CARD_TRAILING, (chevron.loc.x, chevron.loc.y), theme.faint) {
-                c.text_in(ctx.painter, chevron, TextAlign::Center, "\u{203a}", theme.faint, &TextStyle::HEAD);
-            }
-            right = chevron.loc.x - CARD_GAP;
-        }
-        Trailing::Lock { open } => {
-            let chevron = local_rect(right - CARD_TRAILING, centre_y - CARD_TRAILING / 2, CARD_TRAILING, CARD_TRAILING);
-            let icon = if open { "pan-down" } else { "go-next" };
-            let colour = if open { theme.label } else { theme.faint };
-            if !c.icon(icon, CARD_TRAILING, (chevron.loc.x, chevron.loc.y), colour) {
-                c.text_in(ctx.painter, chevron, TextAlign::Center, "\u{203a}", colour, &TextStyle::HEAD);
-            }
-            let lock = local_rect(chevron.loc.x - SP1 - CARD_TRAILING, chevron.loc.y, CARD_TRAILING, CARD_TRAILING);
-            super::qs_symbol(
-                c,
-                lock,
-                ("network-wireless-encrypted", crate::paint::draw_lock_glyph_over),
-                CARD_TRAILING,
-                theme.faint,
-            );
-            right = lock.loc.x - CARD_GAP;
-        }
+    if !matches!(spec.tail, Tail::Nothing | Tail::Switch(_)) {
+        right = tail.loc.x - SP1 - SP1 / 2;
     }
 
-    let left = well.loc.x + CARD_ICON + CARD_GAP;
-    let title_h = CARD_PRIMARY.line_height_px as i32;
+    let left = well.loc.x + ROW_WELL + ROW_GAP;
+    let title_h = super::QS_TITLE.line_height_px as i32;
     let sub_h = super::QS_NOTE.line_height_px as i32;
     let top = rect.loc.y + (rect.size.h - title_h - sub_h) / 2;
-    let title_colour = if spec.active { theme.active_soft_label } else { theme.label };
-    c.text(ctx.painter, (left, right, top, top + title_h), TextAlign::Left, spec.title, title_colour, &CARD_PRIMARY);
-    let sub_colour =
-        spec.subtitle.1.unwrap_or(if spec.active { super::dimmed(accent, super::QS_SOFT_DIM) } else { accent });
+    let title_ink = if spec.on { theme.active_soft_label } else { theme.label };
+    c.text(ctx.painter, (left, right, top, top + title_h), TextAlign::Left, spec.title, title_ink, &super::QS_TITLE);
+    let sub_ink = spec.subtitle.1.unwrap_or(if spec.on { theme.active_soft_label } else { theme.muted });
     let band = (left, right, top + title_h, top + title_h + sub_h);
-    c.text(ctx.painter, band, TextAlign::Left, &spec.subtitle.0, sub_colour, &super::QS_NOTE);
+    c.text(ctx.painter, band, TextAlign::Left, &spec.subtitle.0, sub_ink, &super::QS_NOTE);
+}
+
+fn draw_page_switch(c: &mut Canvas<'_>, theme: &TopbarTheme, rect: LocalRect, on: bool) {
+    c.fill(rect, if on { theme.active_background } else { theme.track }, R_ROUND);
+    let x = if on {
+        rect.loc.x + rect.size.w - DETAIL_SWITCH_INSET - DETAIL_SWITCH_THUMB
+    } else {
+        rect.loc.x + DETAIL_SWITCH_INSET
+    };
+    let knob = local_rect(x, rect.loc.y + DETAIL_SWITCH_INSET, DETAIL_SWITCH_THUMB, DETAIL_SWITCH_THUMB);
+    c.fill(knob, if on { super::QS_THUMB_FACE } else { theme.thumb }, R_ROUND);
 }
 
 fn subtitle_with(status: (&TopbarTheme, RowStatus), fallback: String) -> (String, Option<Color>) {
-    status_trailing(status.0, status.1).map_or((fallback, None), |(text, colour)| (text, Some(colour)))
+    status_subtitle(status.0, status.1).map_or((fallback, None), |(text, colour)| (text, Some(colour)))
 }
 
 fn network_subtitle(network: &WifiNetwork) -> Key {
     if network.connected {
-        Key::Connected
+        Key::QsRowConnected
     } else if network.security == Security::Enterprise && !network.saved {
-        Key::QsEnterprise
+        Key::QsRowEnterprise
     } else if network.saved {
         Key::QsSaved
     } else if network.security.is_secured() {
@@ -1571,70 +1720,197 @@ fn network_subtitle(network: &WifiNetwork) -> Key {
     }
 }
 
-fn draw_network_card(
-    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, network: &WifiNetwork,
-    (status, open): (RowStatus, bool),
+fn draw_network_row(
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, network: &WifiNetwork, status: RowStatus,
 ) {
-    if open {
-        let failed = matches!(status, RowStatus::Failed(_));
-        let block = local_rect(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h + prompt_height(failed));
-        c.fill(block, ctx.theme.fill_2, R2);
-        c.stroke(block, 1.0, R2, ctx.theme.line);
+    let tail = if busy(status) {
+        Tail::Busy
+    } else if network.connected {
+        Tail::Check
+    } else if network.security == Security::Enterprise {
+        Tail::External
+    } else if network.security.is_secured() && !network.saved {
+        Tail::Lock
     } else {
-        card_background(c, ctx.theme, rect, network.connected);
-    }
-    let secured = network.security.is_secured() && !network.connected;
-    let spec = CardSpec {
+        Tail::Nothing
+    };
+    let spec = RowSpec {
         icon: network.icon(),
         glyph: crate::paint::draw_wifi_waves_glyph_over,
         title: &network.ssid,
         subtitle: subtitle_with((ctx.theme, status), t(network_subtitle(network)).to_string()),
-        active: network.connected && !open,
-        action: network.connected.then(|| t(Key::QsDisconnect)),
-        trailing: if secured { Trailing::Lock { open } } else { Trailing::Nothing },
+        on: network.connected,
+        tail,
     };
-    draw_card(c, ctx, rect, &spec);
+    draw_row(c, ctx, rect, &spec);
 }
 
-fn draw_device_card(
+fn draw_device_row(
     c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, device: &BtDevice, status: RowStatus,
 ) {
-    card_background(c, ctx.theme, rect, device.connected);
     let fallback = if device.connected {
         device.battery.map_or_else(
-            || t(Key::Connected).to_string(),
-            |pct| format!("{} \u{b7} {}", t(Key::Connected), t(Key::QsBatteryLevel).replace("{}", &pct.to_string())),
+            || t(Key::QsRowConnected).to_string(),
+            |pct| format!("{} \u{b7} {}", t(Key::QsRowConnected), t(Key::QsRowBattery).replace("{}", &pct.to_string())),
         )
     } else {
-        t(Key::QsPaired).to_string()
+        t(Key::QsRowNotConnected).to_string()
     };
-    let spec = CardSpec {
+    let tail = if busy(status) {
+        Tail::Busy
+    } else if device.connected {
+        Tail::Check
+    } else {
+        Tail::Nothing
+    };
+    let spec = RowSpec {
         icon: device.kind.icon(),
         glyph: crate::paint::draw_bluetooth_glyph_over,
         title: &device.name,
         subtitle: subtitle_with((ctx.theme, status), fallback),
-        active: device.connected,
-        action: Some(t(if device.connected { Key::QsDisconnect } else { Key::QsConnect })),
-        trailing: Trailing::Nothing,
+        on: device.connected,
+        tail,
     };
-    draw_card(c, ctx, rect, &spec);
+    draw_row(c, ctx, rect, &spec);
 }
 
-fn draw_audio_card(
+fn draw_audio_row(
     c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, device: &AudioOutput, status: RowStatus,
 ) {
-    card_background(c, ctx.theme, rect, device.active);
-    let kind = if device.active { Key::QsDefaultDevice } else { super::qs_device_kind(device.icon) };
-    let spec = CardSpec {
+    let tail = if busy(status) {
+        Tail::Busy
+    } else if device.active {
+        Tail::Check
+    } else {
+        Tail::Nothing
+    };
+    let spec = RowSpec {
         icon: device.icon,
         glyph: |b, w, h, side, stroke, s, c| crate::paint::draw_speaker_glyph_over(b, w, h, side, stroke, false, s, c),
         title: &device.description,
-        subtitle: subtitle_with((ctx.theme, status), t(kind).to_string()),
-        active: device.active,
-        action: None,
-        trailing: if device.active { Trailing::Tick } else { Trailing::Nothing },
+        subtitle: subtitle_with((ctx.theme, status), t(super::qs_device_kind(device.icon)).to_string()),
+        on: device.active,
+        tail,
     };
-    draw_card(c, ctx, rect, &spec);
+    draw_row(c, ctx, rect, &spec);
+}
+
+fn draw_mic_slider(
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, status: &crate::system_info::SystemStatus,
+) {
+    let row = super::qs_slider_row(rect.loc.x, rect.loc.y, rect.size.w, true);
+    let (muted, pct) = (status.mic_muted, status.mic_pct);
+    let colour = super::draw_qs_mute_button(c, ctx.theme, row.icon, muted);
+    super::draw_qs_mic_glyph(c, row.icon, (muted, colour));
+    super::draw_qs_readout(c, ctx, row.readout, Some((pct, muted)));
+    let thumb = super::QsThumb::of(Slot::QsMicTrack, ctx.hovered, None);
+    super::draw_qs_track(c, ctx.theme, row.track, super::QsTrack { pct, muted, enabled: true, thumb });
+}
+
+const fn vpn_kind_key(kind: VpnKind) -> Key {
+    match kind {
+        VpnKind::WireGuard => Key::QsVpnWireGuard,
+        VpnKind::Vpn => Key::QsVpnGeneric,
+    }
+}
+
+fn draw_vpn_row(
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, vpn: &VpnConnection, status: RowStatus,
+) {
+    let kind = t(vpn_kind_key(vpn.kind));
+    let fallback = if vpn.active { format!("{} \u{b7} {kind}", t(Key::QsRowConnected)) } else { kind.to_string() };
+    let tail = if busy(status) {
+        Tail::Busy
+    } else if vpn.active {
+        Tail::Check
+    } else {
+        Tail::Nothing
+    };
+    let spec = RowSpec {
+        icon: "network-vpn",
+        glyph: crate::paint::draw_lock_glyph_over,
+        title: &vpn.name,
+        subtitle: subtitle_with((ctx.theme, status), fallback),
+        on: vpn.active,
+        tail,
+    };
+    draw_row(c, ctx, rect, &spec);
+}
+
+fn draw_netbird_row(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, view: &netbird::NetbirdView) {
+    let (on, busy, subtitle) = view.row();
+    let tail = if busy {
+        Tail::Busy
+    } else if on {
+        Tail::Check
+    } else {
+        Tail::Nothing
+    };
+    let spec = RowSpec {
+        icon: "network-vpn",
+        glyph: crate::paint::draw_lock_glyph_over,
+        title: "NetBird",
+        subtitle: (subtitle, None),
+        on,
+        tail,
+    };
+    draw_row(c, ctx, rect, &spec);
+}
+
+fn draw_ethernet_row(
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, status: &crate::system_info::SystemStatus,
+) {
+    let on = status.ethernet_connected;
+    let spec = RowSpec {
+        icon: if on { "network-wired" } else { "network-wired-disconnected" },
+        glyph: crate::paint::draw_wifi_waves_glyph_over,
+        title: t(Key::QsEthernetShort),
+        subtitle: (t(if on { Key::QsRowConnected } else { Key::QsCableDisconnected }).to_string(), None),
+        on,
+        tail: if on { Tail::Check } else { Tail::Nothing },
+    };
+    draw_row(c, ctx, rect, &spec);
+}
+
+fn draw_airplane_row(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, on: bool) {
+    let spec = RowSpec {
+        icon: "airplane-mode",
+        glyph: crate::paint::draw_wifi_waves_glyph_over,
+        title: t(Key::AirplaneMode),
+        subtitle: (t(Key::QsAirplaneSub).to_string(), None),
+        on: false,
+        tail: Tail::Switch(on),
+    };
+    draw_row(c, ctx, rect, &spec);
+}
+
+fn draw_empty(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, empty: Empty) {
+    let theme = ctx.theme;
+    let centre = rect.loc.x + rect.size.w / 2;
+    let mut y = rect.loc.y + EMPTY_PAD_TOP;
+    let well = local_rect(centre - EMPTY_WELL / 2, y, EMPTY_WELL, EMPTY_WELL);
+    c.fill(well, theme.fill_2, R3);
+    super::qs_symbol(c, well, empty.icon.symbol(), super::QS_ICON, theme.muted);
+    y += EMPTY_WELL + SP2 + SP1;
+    let title_h = super::QS_TITLE.line_height_px as i32;
+    let (left, right) = (rect.loc.x + SP3, rect.loc.x + rect.size.w - SP3);
+    c.text(
+        ctx.painter,
+        (left, right, y, y + title_h),
+        TextAlign::Center,
+        t(empty.title),
+        theme.label,
+        &super::QS_TITLE,
+    );
+    y += title_h + SP1;
+    if let Some(text) = empty.text {
+        let line_h = EMPTY_TEXT.line_height_px as i32;
+        for line in crate::notifications::wrap_lines(ctx.painter, t(text), &EMPTY_TEXT, right - left, EMPTY_TEXT_LINES)
+        {
+            c.text(ctx.painter, (left, right, y, y + line_h), TextAlign::Center, &line, theme.muted, &EMPTY_TEXT);
+            y += line_h;
+        }
+    }
 }
 
 fn draw_prompt(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, prompt: &Prompt, failed: bool) {
@@ -1838,11 +2114,8 @@ mod tests {
         let second = bar.slot_rect(Slot::QsDetailRow(1)).expect("row 1");
         let third = bar.slot_rect(Slot::QsDetailRow(2)).expect("row 2");
         assert_eq!(first.size.h, DETAIL_CARD);
-        assert!(
-            second.loc.y > first.loc.y + DETAIL_CARD + DETAIL_CARD_GAP,
-            "a section label parts connected from available"
-        );
-        assert_eq!(third.loc.y, second.loc.y + DETAIL_CARD + DETAIL_CARD_GAP, "cards in one section sit 6 px apart");
+        assert_eq!(second.loc.y, first.loc.y + DETAIL_CARD + DETAIL_CARD_GAP, "one list, the connected network first");
+        assert_eq!(third.loc.y, second.loc.y + DETAIL_CARD + DETAIL_CARD_GAP, "rows sit 2 px apart");
         assert_eq!(bar.detail_row(1), Some(RowTarget::Network(network("Cafe", false, false))));
         assert_eq!(bar.detail_row(9), None);
     }
@@ -1850,17 +2123,18 @@ mod tests {
     #[test]
     fn each_view_groups_its_cards_under_section_labels() {
         let bar = open_wifi();
-        let geometry = detail_geometry(qs_geometry(&bar.qs_shape(None)).height, true, true);
+        let geometry = detail_geometry(super::super::QS_PAGE_MAX, true, true);
         let items = detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), geometry.body, None);
         let kinds: Vec<ItemKind> = items.iter().map(|item| item.kind).collect();
         assert_eq!(
             kinds,
             [
-                ItemKind::Section(Key::QsConnectedNetwork),
+                ItemKind::Section(Key::WiFi),
                 ItemKind::Network(0),
-                ItemKind::Section(Key::QsAvailableNetworks),
                 ItemKind::Network(1),
                 ItemKind::Network(2),
+                ItemKind::Separator,
+                ItemKind::Airplane,
             ]
         );
         assert!(items.iter().all(|item| geometry.body.contains(item.rect.loc)));
@@ -1877,7 +2151,14 @@ mod tests {
         assert_eq!(profiles, super::super::QS_PROFILES.map(|profile| Some(Slot::QsProfile(profile))));
         let off = crate::system_info::SystemStatus { wifi_enabled: false, ..status };
         let wifi_off = detail_items(&bar.qs_panel, Detail::Wifi, &off, geometry.body, None);
-        assert_eq!(wifi_off.iter().map(|item| item.kind).collect::<Vec<_>>(), [ItemKind::Message(Key::QsWifiIsOff)]);
+        let kinds: Vec<ItemKind> = wifi_off.iter().map(|item| item.kind).collect();
+        assert_eq!(kinds, [ItemKind::Empty(Empty::wifi_off(false)), ItemKind::Separator, ItemKind::Airplane]);
+        let wired = crate::system_info::SystemStatus { wifi_available: false, ethernet_available: true, ..off };
+        let kinds: Vec<ItemKind> = detail_items(&bar.qs_panel, Detail::Wifi, &wired, geometry.body, None)
+            .iter()
+            .map(|item| item.kind)
+            .collect();
+        assert_eq!(kinds, [ItemKind::Section(Key::QsWired), ItemKind::Ethernet], "a desktop has no airplane mode");
     }
 
     #[test]
@@ -1890,7 +2171,14 @@ mod tests {
         }
         assert_eq!(
             visited,
-            [Slot::QsBack, Slot::QsDetailRow(0), Slot::QsDetailRow(1), Slot::QsDetailRow(2), Slot::QsDetailSettings,]
+            [
+                Slot::QsBack,
+                Slot::QsDetailRow(0),
+                Slot::QsDetailRow(1),
+                Slot::QsDetailRow(2),
+                Slot::QsAirplane,
+                Slot::QsDetailSettings,
+            ]
         );
     }
 
@@ -2107,7 +2395,7 @@ mod tests {
 
     #[test]
     fn the_detail_list_stays_inside_the_popup() {
-        let height = super::super::qs_page_height(qs_geometry(&super::super::QsShape::default()).height);
+        let height = super::super::QS_PAGE_MAX;
         for radio in [true, false] {
             let geometry = detail_geometry(height, radio, true);
             assert!(geometry.body.size.h >= (DETAIL_CARD + DETAIL_CARD_GAP) * 6, "room for a useful list");
@@ -2164,9 +2452,9 @@ mod tests {
         let theme = TopbarTheme::default();
         bar.qs_panel.armed = Some(PowerAction::ShutDown);
         bar.qs_panel.apps = vec!["Firefox".into()];
-        let height = super::super::qs_page_height(qs_geometry(&bar.qs_shape(None)).height);
-        let details = [Detail::Wifi, Detail::Bluetooth, Detail::Sound, Detail::Battery, Detail::Netbird, Detail::Power];
+        let details = [Detail::Wifi, Detail::Bluetooth, Detail::Sound, Detail::Battery, Detail::Vpn, Detail::Power];
         for detail in details {
+            let height = bar.page_height(Some(&painter), detail);
             for (scale, hovered) in [(1, None), (2, Some(Slot::QsPromptCancel)), (2, Some(Slot::QsDetailSettings))] {
                 let ctx = QsRenderContext { painter: &painter, theme: &theme, hovered };
                 let mut canvas = Canvas::new(QS_WIDTH, height, scale).expect("detail canvas");
@@ -2200,56 +2488,44 @@ mod tests {
         ]));
     }
 
-    #[test]
-    fn the_netbird_view_shows_the_connection_the_session_the_profiles_the_exit_nodes_and_the_network() {
-        use netbird::NbItem;
-        let mut bar = Topbar::new(TopbarTheme::default());
-        connect_netbird(&mut bar);
-        let kinds_in = |height: i32| -> Vec<ItemKind> {
-            let body = detail_geometry(height, has_radio(Detail::Netbird), true).body;
-            detail_items(&bar.qs_panel, Detail::Netbird, &bar.system_status, body, None)
-                .into_iter()
-                .map(|item| item.kind)
-                .collect()
-        };
-        let short = kinds_in(super::super::qs_page_height(qs_geometry(&bar.qs_shape(None)).height));
-        assert!(
-            !matches!(short.last(), Some(ItemKind::Section(_))),
-            "a section never closes the panel without a card under it: {short:?}"
-        );
-        let kinds = kinds_in(900);
-        assert_eq!(
-            kinds,
-            [
-                ItemKind::Netbird(NbItem::Status),
-                ItemKind::Netbird(NbItem::Session),
-                ItemKind::Section(Key::NbProfiles),
-                ItemKind::Netbird(NbItem::Profile(0)),
-                ItemKind::Netbird(NbItem::Profile(1)),
-                ItemKind::Section(Key::NbExitNode),
-                ItemKind::Netbird(NbItem::ExitNone),
-                ItemKind::Netbird(NbItem::Exit(0)),
-                ItemKind::Section(Key::NbNetwork),
-                ItemKind::Netbird(NbItem::Peers),
-                ItemKind::Netbird(NbItem::Resources),
-            ]
-        );
-        assert!(has_radio(Detail::Netbird) && radio_on(Detail::Netbird, &bar.qs_panel, &bar.system_status));
-        assert_eq!(more_slot(Detail::Netbird), Slot::QsNetbirdMore);
+    fn vpn(name: &str, active: bool) -> VpnConnection {
+        VpnConnection { name: name.into(), kind: VpnKind::WireGuard, active }
     }
 
     #[test]
-    fn a_stopped_netbird_service_shows_only_the_status_card() {
+    fn the_vpn_page_lists_netbird_and_every_networkmanager_connection() {
         let mut bar = Topbar::new(TopbarTheme::default());
-        bar.set_netbird_installed(true);
-        let body = detail_geometry(600, true, true).body;
-        let loading = detail_items(&bar.qs_panel, Detail::Netbird, &bar.system_status, body, None);
-        assert_eq!(loading.iter().map(|item| item.kind).collect::<Vec<_>>(), [ItemKind::Message(Key::NbLoading)]);
-        bar.apply_netbird(NetbirdUpdate::Status(Box::new(glide_netbird::Status::unavailable())));
-        let down = detail_items(&bar.qs_panel, Detail::Netbird, &bar.system_status, body, None);
-        assert_eq!(down.len(), 1);
-        assert_eq!(down[0].slot, None, "nothing to click while the daemon is away");
-        assert!(!radio_on(Detail::Netbird, &bar.qs_panel, &bar.system_status));
+        connect_netbird(&mut bar);
+        bar.apply_net_event(NetEvent::Vpn(vec![vpn("Office", true), vpn("Proton", false)]));
+        let body = detail_geometry(600, has_radio(Detail::Vpn), true).body;
+        let kinds: Vec<ItemKind> = detail_items(&bar.qs_panel, Detail::Vpn, &bar.system_status, body, None)
+            .into_iter()
+            .map(|i| i.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [ItemKind::Section(Key::QsVpnSection), ItemKind::VpnNetbird, ItemKind::Vpn(0), ItemKind::Vpn(1)]
+        );
+        assert!(!has_radio(Detail::Vpn), "one active connection, chosen by its row");
+        assert_eq!(more_slot(Detail::Vpn), Slot::QsNetbirdMore);
+        bar.toggle_popup(OpenPopup::QuickSettings);
+        bar.open_detail(Detail::Vpn);
+        assert_eq!(bar.detail_row(0), Some(RowTarget::Netbird));
+        assert_eq!(bar.detail_row(2), Some(RowTarget::Vpn(vpn("Proton", false))));
+        assert_eq!(
+            bar.vpn_toggle_target(),
+            Some(RowTarget::Vpn(vpn("Office", true))),
+            "the tile turns the active one off"
+        );
+    }
+
+    #[test]
+    fn without_any_vpn_the_page_explains_itself() {
+        let bar = Topbar::new(TopbarTheme::default());
+        let body = detail_geometry(600, false, true).body;
+        let items = detail_items(&bar.qs_panel, Detail::Vpn, &bar.system_status, body, None);
+        assert!(matches!(items.as_slice(), [DetailItem { kind: ItemKind::Empty(_), slot: None, .. }]));
+        assert_eq!(bar.vpn_toggle_target(), None);
     }
 
     #[test]

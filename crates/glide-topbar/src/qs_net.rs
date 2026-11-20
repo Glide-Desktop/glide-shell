@@ -121,8 +121,23 @@ pub struct AudioOutput {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VpnKind {
+    WireGuard,
+    Vpn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VpnConnection {
+    pub name: String,
+    pub kind: VpnKind,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetEvent {
+    Vpn(Vec<VpnConnection>),
+    VpnResult { name: String, result: Result<(), ConnectError> },
     Wifi(Vec<WifiNetwork>),
     WifiResult { ssid: String, result: Result<(), ConnectError> },
     Bluetooth(Vec<BtDevice>),

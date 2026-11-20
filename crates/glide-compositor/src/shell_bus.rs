@@ -95,11 +95,12 @@ pub fn quick_settings_view(view: &str) -> Result<Option<crate::topbar::Detail>, 
     use crate::topbar::Detail;
     match view {
         "" => Ok(None),
-        "wifi" => Ok(Some(Detail::Wifi)),
+        "network" | "wifi" => Ok(Some(Detail::Wifi)),
         "bluetooth" => Ok(Some(Detail::Bluetooth)),
         "sound" => Ok(Some(Detail::Sound)),
         "battery" => Ok(Some(Detail::Battery)),
-        "netbird" => Ok(Some(Detail::Netbird)),
+        "power" => Ok(Some(Detail::Power)),
+        "vpn" | "netbird" => Ok(Some(Detail::Vpn)),
         _ => Err(()),
     }
 }

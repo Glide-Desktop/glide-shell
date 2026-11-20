@@ -2113,7 +2113,7 @@ impl GlideState {
                 crate::system_info::set_bluetooth(!was_on);
                 self.update_system_status(|status| status.bluetooth_on = !was_on);
             }
-            TopbarAction::QsToggleNetbird => self.toggle_netbird(),
+            TopbarAction::QsToggleVpn => self.toggle_vpn_tile(),
             TopbarAction::QsToggleNightLight => {
                 let on = !self.topbar.system_status().night_light_on;
                 self.update_system_status(|status| status.night_light_on = on);
@@ -2258,6 +2258,7 @@ impl GlideState {
                 if self.topbar.open_popup() == Some(OpenPopup::QuickSettings) {
                     crate::qs_net::request(crate::qs_net::NetRequest::ScanOutputs);
                     crate::qs_net::request(crate::qs_net::NetRequest::ScanInputs);
+                    Self::refresh_quick_settings_lists();
                 }
             }
             TopbarAction::ClearAllNotifications
