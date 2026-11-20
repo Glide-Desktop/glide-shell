@@ -5,10 +5,8 @@ use super::{
 };
 
 use crate::i18n::{Key, t};
-use crate::power::PowerAction;
-use crate::qs_net::{
-    AudioOutput, BtDevice, CHARGE_LIMIT_KEY, ChargeLimit, ConnectError, NetEvent, Security, WifiNetwork,
-};
+use crate::power::{PowerAction, is_destructive};
+use crate::qs_net::{AudioOutput, BtDevice, ConnectError, NetEvent, Security, WifiNetwork};
 use crate::system_info::{BatteryInfo, BatteryState, PowerProfile};
 use glide_shell::field::{CaretMove, TextField};
 use glide_theme::shape::{R_ROUND, R1, R2};
@@ -20,20 +18,30 @@ mod netbird;
 pub use netbird::{NetbirdPending, NetbirdRow, NetbirdUpdate, remaining_text};
 
 const DETAIL_BACK: i32 = 28;
-const DETAIL_BACK_ICON: i32 = 12;
-const DETAIL_HEAD_GAP: i32 = 2;
-const DETAIL_SWITCH_W: i32 = 32;
-const DETAIL_SWITCH_H: i32 = 18;
-const DETAIL_SWITCH_THUMB: i32 = 14;
-const DETAIL_SWITCH_INSET: i32 = 2;
+const DETAIL_BACK_ICON: i32 = 16;
+const DETAIL_HEAD: i32 = 34;
+const DETAIL_SWITCH_W: i32 = 44;
+const DETAIL_SWITCH_H: i32 = 26;
+const DETAIL_SWITCH_THUMB: i32 = 20;
+const DETAIL_SWITCH_INSET: i32 = 3;
+const MENU_ROW: i32 = 34;
+const MENU_ICON: i32 = 16;
+const MENU_SEP: i32 = SP1 * 2 + 1;
+const CONFIRM_PAD: i32 = SP3;
+const CONFIRM_NOTE_LINES: usize = 2;
+const BATTERY_HERO: i32 = SP1 + 33 + 16;
+const SEGMENTS: i32 = 34;
+const SEGMENT_INSET: i32 = 2;
+const SEGMENT_ICON: i32 = 14;
+const SEGMENT_HINT: i32 = SP2 + 32 + SP1;
+const MENU_ITEM: TextStyle = TextStyle { size_px: 13.5, line_height_px: 20.0, weight: 450, ..TextStyle::CAP };
+const KEYCAP: TextStyle = TextStyle { size_px: 11.0, line_height_px: 14.0, weight: 450, ..TextStyle::NUM };
 const DETAIL_SECTION: i32 = 14;
 const DETAIL_CARD: i32 = 48;
 const DETAIL_CARD_GAP: i32 = 6;
 const DETAIL_GROUP_GAP: i32 = SP1 + SP3 - DETAIL_CARD_GAP;
 const DETAIL_SETTINGS: i32 = 32;
 const DETAIL_CHEVRON: i32 = 14;
-const DETAIL_DIAG: i32 = DIAG_PAD_Y * 2 + DIAG_LABEL + DIAG_GAP + DIAG_VALUE + 2;
-const DETAIL_PROFILE: i32 = CARD_PAD_X * 2 + PROFILE_TITLE + 2 + PROFILE_HINT + 2;
 const CARD_PAD_X: i32 = 10;
 const CARD_GAP: i32 = 10;
 const CARD_ICON: i32 = 24;
@@ -43,10 +51,6 @@ const CARD_ACTION_H: i32 = 22;
 const CARD_ACTION_PAD: i32 = SP2;
 const CARD_PRIMARY: TextStyle = TextStyle { size_px: 12.5, line_height_px: 16.0, weight: 600, ..TextStyle::CAP };
 const CARD_ACTION: TextStyle = TextStyle { size_px: 11.0, line_height_px: 14.0, weight: 550, ..TextStyle::CAP };
-const RADIO: i32 = 16;
-const RADIO_DOT: i32 = 8;
-const PROFILE_TITLE: i32 = 16;
-const PROFILE_HINT: i32 = 14;
 const PROMPT_PAD_X: i32 = 10;
 const PROMPT_PAD_TOP: i32 = SP2;
 const PROMPT_PAD_BOTTOM: i32 = 10;
@@ -56,17 +60,6 @@ const PROMPT_ERROR: i32 = 14;
 const PROMPT_PILL: i32 = 28;
 const PROMPT_REVEAL: i32 = 24;
 const PROMPT_EYE: i32 = 14;
-const DIAG_PAD_X: i32 = 10;
-const DIAG_PAD_Y: i32 = SP2;
-const DIAG_LABEL: i32 = 13;
-const DIAG_GAP: i32 = 2;
-const DIAG_VALUE: i32 = 18;
-const DIAG_UNIT_GAP: i32 = 6;
-const DIAG_PILL_H: i32 = 16;
-const DIAG_PILL_PAD: i32 = 6;
-const DIAG_PILL: TextStyle = TextStyle { size_px: 10.0, line_height_px: 12.0, weight: 600, ..TextStyle::CAP };
-const HEALTHY_PCT: u8 = 80;
-const DEFAULT_CHARGE_END: u32 = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Detail {
@@ -75,6 +68,7 @@ pub enum Detail {
     Battery,
     Sound,
     Netbird,
+    Power,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +81,6 @@ pub enum PanelAction {
     PromptReveal,
     PromptCancel,
     PromptSubmit,
-    ChargeLimit,
     Settings,
 }
 
@@ -141,8 +134,47 @@ pub enum PromptOutcome {
     Submit { ssid: String, password: String },
 }
 
-pub const POWER_ROW: [PowerAction; 5] =
-    [PowerAction::Lock, PowerAction::Sleep, PowerAction::Restart, PowerAction::ShutDown, PowerAction::LogOut];
+pub const POWER_ROWS: [PowerAction; 5] =
+    [PowerAction::Lock, PowerAction::Sleep, PowerAction::LogOut, PowerAction::Restart, PowerAction::ShutDown];
+
+const fn power_row_label(action: PowerAction) -> Key {
+    match action {
+        PowerAction::Lock => Key::QsLockScreen,
+        PowerAction::Sleep => Key::QsSleepRow,
+        PowerAction::LogOut => Key::QsLogOutRow,
+        PowerAction::Restart => Key::QsRestartRow,
+        PowerAction::ShutDown => Key::QsShutDownRow,
+    }
+}
+
+const fn power_question(action: PowerAction) -> Key {
+    match action {
+        PowerAction::Restart => Key::QsAskRestartShort,
+        PowerAction::ShutDown => Key::QsAskShutDownShort,
+        PowerAction::LogOut | PowerAction::Lock | PowerAction::Sleep => Key::QsAskLogOutShort,
+    }
+}
+
+const fn power_verb(action: PowerAction) -> Key {
+    match action {
+        PowerAction::Restart => Key::PowerConfirmRestart,
+        PowerAction::ShutDown => Key::QsConfirmShutDown,
+        PowerAction::LogOut | PowerAction::Lock | PowerAction::Sleep => Key::PowerConfirmLogOut,
+    }
+}
+
+pub(super) fn apps_note(apps: &[String]) -> String {
+    let names = match apps {
+        [] => return t(Key::QsNoAppsOpen).to_string(),
+        [one] => one.clone(),
+        [first, second] => format!("{first} {} {second}", t(Key::QsAnd)),
+        [first, second, rest @ ..] => {
+            let more = t(Key::QsAndMore).replace("{n}", &rest.len().to_string());
+            format!("{first}, {second} {more}")
+        }
+    };
+    t(Key::QsAppsWillClose).replace("{apps}", &names)
+}
 
 pub(super) const fn power_icon(action: PowerAction) -> &'static str {
     match action {
@@ -169,6 +201,7 @@ pub(super) const fn more_slot(detail: Detail) -> Slot {
         Detail::Battery => Slot::QsBattery,
         Detail::Sound => Slot::QsVolumeMore,
         Detail::Netbird => Slot::QsNetbirdMore,
+        Detail::Power => Slot::QsPowerMenu,
     }
 }
 
@@ -190,14 +223,6 @@ fn time_line(info: &BatteryInfo) -> String {
     match eta {
         Some(eta) => format!("{} \u{b7} {eta}", t(state)),
         None => t(state).to_string(),
-    }
-}
-
-const fn profile_label(profile: PowerProfile) -> Key {
-    match profile {
-        PowerProfile::PowerSaver => Key::TbPowerSaver,
-        PowerProfile::Balanced => Key::TbPowerBalanced,
-        PowerProfile::Performance => Key::TbPowerPerformance,
     }
 }
 
@@ -318,16 +343,17 @@ pub(super) struct DetailPanel {
     inputs: Option<Vec<AudioOutput>>,
     sound_scroll: usize,
     list_scroll: usize,
-    charge: Option<ChargeLimit>,
     pending: Option<Pending>,
     failure: Option<Failure>,
     prompt: Option<Prompt>,
+    pub(super) armed: Option<PowerAction>,
+    pub(super) apps: Vec<String>,
     pub(super) netbird: netbird::NetbirdView,
     pub(super) rev: u64,
 }
 
 impl DetailPanel {
-    const fn bump(&mut self) {
+    pub(super) const fn bump(&mut self) {
         self.rev = self.rev.wrapping_add(1);
     }
 
@@ -367,19 +393,23 @@ impl DetailPanel {
         }
     }
 
+    pub(super) fn collapse(&mut self) -> bool {
+        let collapsed = self.prompt.take().is_some();
+        if collapsed {
+            self.bump();
+        }
+        collapsed
+    }
+
+    pub(super) fn connected_device_names(&self) -> Vec<&str> {
+        self.devices.iter().filter(|device| device.connected).map(|device| device.name.as_str()).collect()
+    }
+
     fn failed(&self, index: usize) -> bool {
         let Some(network) = self.wifi.get(index) else {
             return false;
         };
         self.failure.as_ref().is_some_and(|failure| failure.key == network.ssid)
-    }
-
-    pub(super) fn active_output(&self) -> Option<&AudioOutput> {
-        self.outputs.iter().find(|output| output.active)
-    }
-
-    pub(super) fn active_input(&self) -> Option<&AudioOutput> {
-        self.inputs.iter().flatten().find(|input| input.active)
     }
 
     pub(super) const fn devices_ready(&self, drawer: super::Drawer) -> bool {
@@ -406,9 +436,13 @@ pub(super) enum ItemKind {
     Output(usize),
     Input(usize),
     Prompt(usize),
-    Diag(usize),
-    Profile(PowerProfile),
-    ChargeLimit,
+    BatteryHero,
+    Segments,
+    Segment(PowerProfile),
+    SegmentsHint,
+    PowerRow(PowerAction),
+    PowerSeparator,
+    PowerConfirm(PowerAction),
     Netbird(netbird::NbItem),
 }
 
@@ -430,19 +464,19 @@ pub(super) struct DetailGeometry {
     pub(super) settings: LocalRect,
 }
 
-pub(super) fn detail_geometry(height: i32, radio: bool) -> DetailGeometry {
+pub(super) fn detail_geometry(height: i32, radio: bool, link: bool) -> DetailGeometry {
     let row_w = QS_WIDTH - QS_PAD * 2;
-    let back = local_rect(QS_PAD, QS_PAD, DETAIL_BACK, DETAIL_BACK);
+    let back = local_rect(QS_PAD, QS_PAD + (DETAIL_HEAD - DETAIL_BACK) / 2, DETAIL_BACK, DETAIL_BACK);
     let toggle = local_rect(
         QS_WIDTH - QS_PAD - DETAIL_SWITCH_W,
-        QS_PAD + (DETAIL_BACK - DETAIL_SWITCH_H) / 2,
+        QS_PAD + (DETAIL_HEAD - DETAIL_SWITCH_H) / 2,
         DETAIL_SWITCH_W,
         DETAIL_SWITCH_H,
     );
     let trailing = if radio { DETAIL_SWITCH_W } else { super::QS_READOUT_W };
-    let body_top = QS_PAD + DETAIL_BACK + DETAIL_HEAD_GAP + SP3;
+    let body_top = QS_PAD + DETAIL_HEAD + SP2;
     let settings = local_rect(QS_PAD, height - QS_PAD - DETAIL_SETTINGS, row_w, DETAIL_SETTINGS);
-    let divider_bottom = settings.loc.y - SP1 - 1;
+    let divider_bottom = if link { settings.loc.y - SP2 - 1 } else { height - QS_PAD + SP1 };
     let body = local_rect(QS_PAD, body_top, row_w, (divider_bottom - SP1 - body_top).max(0));
     DetailGeometry {
         back,
@@ -655,46 +689,60 @@ fn sound_items(column: &mut Column<'_>, panel: &DetailPanel) {
     }
 }
 
-fn battery_items(column: &mut Column<'_>, panel: &DetailPanel, status: &crate::system_info::SystemStatus) {
-    battery_health_items(column, status);
-    if panel.charge.is_some() {
-        column.y += SP1;
-        column.card(ItemKind::ChargeLimit, Some(Slot::QsChargeLimit));
+fn battery_items(column: &mut Column<'_>, status: &crate::system_info::SystemStatus) {
+    if status.battery_pct.is_some() {
+        column.push(ItemKind::BatteryHero, BATTERY_HERO, None);
+    }
+    if status.power_profile.is_some() && column.section(Key::QsPowerMode) {
+        let at = column.y;
+        if column.push(ItemKind::Segments, SEGMENTS, None) {
+            for (profile, rect) in segment_rects(local_rect(column.left, at, column.width, SEGMENTS)) {
+                let slot = Some(Slot::QsProfile(profile));
+                column.items.push(DetailItem { kind: ItemKind::Segment(profile), rect, slot });
+            }
+            column.push(ItemKind::SegmentsHint, SEGMENT_HINT, None);
+        }
     }
 }
 
-fn battery_health_items(column: &mut Column<'_>, status: &crate::system_info::SystemStatus) {
-    if column.section(Key::QsBatteryTelemetry) {
-        let half = (column.width - SP2) / 2;
-        for pair in 0..2 {
-            if !column.fits(DETAIL_DIAG) {
-                return;
-            }
-            for side in 0..2 {
-                let x = column.left + side * (half + SP2);
-                let rect = local_rect(x, column.y, half, DETAIL_DIAG);
-                let index = usize::try_from(pair * 2 + side).unwrap_or(0);
-                column.items.push(DetailItem { kind: ItemKind::Diag(index), rect, slot: None });
-            }
-            column.y += DETAIL_DIAG + SP2;
+pub(super) fn segment_rects(track: LocalRect) -> [(PowerProfile, LocalRect); 3] {
+    let inner = track.size.w - SEGMENT_INSET * 2;
+    let edge = |index: i32| track.loc.x + SEGMENT_INSET + inner * index / 3;
+    let mut index = 0;
+    super::QS_PROFILES.map(|profile| {
+        let (left, right) = (edge(index), edge(index + 1));
+        index += 1;
+        (profile, local_rect(left, track.loc.y + SEGMENT_INSET, right - left, track.size.h - SEGMENT_INSET * 2))
+    })
+}
+
+pub(super) fn confirm_height(painter: Option<&crate::paint::Painter>, apps: &[String], width: i32) -> i32 {
+    let note_lines = painter.map_or(CONFIRM_NOTE_LINES, |painter| {
+        let text = apps_note(apps);
+        crate::notifications::wrap_lines(painter, &text, &super::QS_NOTE, width - CONFIRM_PAD * 2, CONFIRM_NOTE_LINES)
+            .len()
+            .max(1)
+    });
+    let note = i32::try_from(note_lines).unwrap_or(2) * super::QS_NOTE.line_height_px as i32;
+    SP1 / 2 + CONFIRM_PAD * 2 + super::QS_TITLE.line_height_px as i32 + SP2 + note + SP2 + super::QS_CONFIRM_PILL + SP2
+}
+
+fn power_items(column: &mut Column<'_>, panel: &DetailPanel, painter: Option<&crate::paint::Painter>) {
+    for action in POWER_ROWS {
+        if action == PowerAction::LogOut {
+            column.push(ItemKind::PowerSeparator, MENU_SEP, None);
         }
-        column.y -= SP2;
-        column.end_group();
-        column.y += DETAIL_CARD_GAP;
-    }
-    if status.power_profile.is_some() && column.section(Key::QsPerformanceProfile) {
-        for profile in super::QS_PROFILES {
-            if !column.fits(DETAIL_PROFILE) {
-                return;
-            }
-            column.push(ItemKind::Profile(profile), DETAIL_PROFILE, Some(Slot::QsProfile(profile)));
-            column.y += DETAIL_CARD_GAP;
+        column.push(ItemKind::PowerRow(action), MENU_ROW, Some(Slot::QsPowerButton(action)));
+        if panel.armed == Some(action) && is_destructive(action) {
+            let height = confirm_height(painter, &panel.apps, column.width);
+            column.push(ItemKind::PowerConfirm(action), height, None);
         }
     }
 }
 
 pub(super) fn detail_items(
     panel: &DetailPanel, detail: Detail, status: &crate::system_info::SystemStatus, body: LocalRect,
+    painter: Option<&crate::paint::Painter>,
 ) -> Vec<DetailItem> {
     let mut items = Vec::new();
     let mut column = Column {
@@ -708,8 +756,9 @@ pub(super) fn detail_items(
         Detail::Wifi => wifi_items(&mut column, panel, status),
         Detail::Bluetooth => bluetooth_items(&mut column, panel, status),
         Detail::Sound => sound_items(&mut column, panel),
-        Detail::Battery => battery_items(&mut column, panel, status),
+        Detail::Battery => battery_items(&mut column, status),
         Detail::Netbird => netbird::items(&mut column, &panel.netbird),
+        Detail::Power => power_items(&mut column, panel, painter),
     }
     items
 }
@@ -718,14 +767,17 @@ fn radio_on(detail: Detail, panel: &DetailPanel, status: &crate::system_info::Sy
     match detail {
         Detail::Wifi => status.wifi_enabled,
         Detail::Bluetooth => status.bluetooth_on,
-        Detail::Battery => status.battery_pct.is_some(),
-        Detail::Sound => true,
         Detail::Netbird => panel.netbird.switched_on(),
+        Detail::Battery | Detail::Sound | Detail::Power => false,
     }
 }
 
 const fn has_radio(detail: Detail) -> bool {
-    !matches!(detail, Detail::Battery | Detail::Sound)
+    matches!(detail, Detail::Wifi | Detail::Bluetooth | Detail::Netbird)
+}
+
+const fn has_link(detail: Detail) -> bool {
+    !matches!(detail, Detail::Power)
 }
 
 impl Topbar {
@@ -773,8 +825,9 @@ impl Topbar {
             return false;
         }
         let keyboard = self.focused.is_some();
-        self.forget_power();
-        self.forget_drawer();
+        if detail != Detail::Power {
+            self.forget_power();
+        }
         self.qs_panel.view = Some(detail);
         self.qs_panel.sound_scroll = 0;
         self.qs_panel.list_scroll = 0;
@@ -808,7 +861,7 @@ impl Topbar {
             Detail::Wifi => self.qs_panel.wifi.get(index).cloned().map(RowTarget::Network),
             Detail::Bluetooth => self.qs_panel.devices.get(index).cloned().map(RowTarget::Device),
             Detail::Sound => self.qs_panel.outputs.get(index).cloned().map(RowTarget::Output),
-            Detail::Battery => None,
+            Detail::Battery | Detail::Power => None,
             Detail::Netbird => netbird::row(&self.qs_panel.netbird, u16::try_from(index).ok()?).map(RowTarget::Netbird),
         }
     }
@@ -830,8 +883,7 @@ impl Topbar {
                 .position(|o| o.name == key)
                 .and_then(row)
                 .or_else(|| self.device_slot_for(super::Drawer::Input, key)),
-            Some(Detail::Battery | Detail::Netbird) => None,
-            None => self.qs_drawer.and_then(|drawer| self.device_slot_for(drawer, key)),
+            Some(Detail::Battery | Detail::Netbird | Detail::Power) | None => None,
         }
     }
 
@@ -893,11 +945,6 @@ impl Topbar {
         self.qs_panel.bump();
         self.touch();
         true
-    }
-
-    #[must_use]
-    pub fn charge_limit(&self) -> Option<ChargeLimit> {
-        self.qs_panel.charge.clone().filter(|_| self.detail() == Some(Detail::Battery))
     }
 
     pub fn focus_password(&mut self) {
@@ -1007,13 +1054,6 @@ impl Topbar {
                 }
                 self.qs_panel.inputs = Some(inputs);
             }
-            NetEvent::ChargeLimit(limit) => {
-                if self.qs_panel.charge == limit {
-                    return false;
-                }
-                self.qs_panel.charge = limit;
-            }
-            NetEvent::ChargeLimitResult(result) => self.settle_pending(CHARGE_LIMIT_KEY, result),
         }
         self.qs_panel.bump();
         self.touch();
@@ -1023,12 +1063,13 @@ impl Topbar {
     pub(super) fn detail_slots(&self, painter: &crate::paint::Painter) -> Option<Vec<(Slot, LocalRect)>> {
         let detail = self.qs_panel.view?;
         let radio = has_radio(detail);
-        let geometry = detail_geometry(qs_geometry(&self.qs_shape(None)).height, radio);
+        let height = super::qs_page_height(qs_geometry(&self.qs_shape(None)).height);
+        let geometry = detail_geometry(height, radio, has_link(detail));
         let mut slots = vec![(Slot::QsBack, geometry.back)];
         if radio {
             slots.push((Slot::QsDetailToggle, geometry.toggle));
         }
-        for item in detail_items(&self.qs_panel, detail, &self.system_status, geometry.body) {
+        for item in detail_items(&self.qs_panel, detail, &self.system_status, geometry.body, Some(painter)) {
             if let Some(slot) = item.slot {
                 slots.push((slot, item.rect));
             }
@@ -1039,8 +1080,15 @@ impl Topbar {
                 slots.push((Slot::QsPromptCancel, parts.cancel));
                 slots.push((Slot::QsPromptConnect, parts.connect));
             }
+            if let ItemKind::PowerConfirm(action) = item.kind {
+                let (cancel, confirm) = confirm_buttons(painter, item.rect, action);
+                slots.push((Slot::QsPowerCancel, cancel));
+                slots.push((Slot::QsPowerConfirm(action), confirm));
+            }
         }
-        slots.push((Slot::QsDetailSettings, geometry.settings));
+        if has_link(detail) {
+            slots.push((Slot::QsDetailSettings, geometry.settings));
+        }
         Some(slots)
     }
 }
@@ -1077,7 +1125,8 @@ pub(super) fn push_detail<R>(
     let Some(buffer) = topbar.qs_detail_cache.resolve(key, output_scale, || {
         let ctx = QsRenderContext { painter, theme, hovered };
         let mut canvas = Canvas::new(rect.size.w, rect.size.h, output_scale)?.with_icons(Some(icons));
-        draw_detail(&mut canvas, &ctx, panel, detail, status);
+        let profile = status.power_profile.map_or(1.0, super::profile_index);
+        draw_detail(&mut canvas, &ctx, panel, detail, status, profile);
         Some(canvas.finish())
     }) else {
         return;
@@ -1098,23 +1147,36 @@ pub(super) fn push_detail<R>(
     );
 }
 
+fn confirm_buttons(painter: &crate::paint::Painter, rect: LocalRect, action: PowerAction) -> (LocalRect, LocalRect) {
+    let cancel_w = super::qs_confirm_pill_width(painter, t(Key::PowerCancel));
+    let confirm_w = super::qs_confirm_pill_width(painter, t(power_verb(action)));
+    let right = rect.loc.x + rect.size.w - CONFIRM_PAD;
+    let y = rect.loc.y + rect.size.h - SP2 - CONFIRM_PAD - super::QS_CONFIRM_PILL;
+    let confirm = local_rect(right - confirm_w, y, confirm_w, super::QS_CONFIRM_PILL);
+    let cancel = local_rect(confirm.loc.x - SP2 - cancel_w, y, cancel_w, super::QS_CONFIRM_PILL);
+    (cancel, confirm)
+}
+
 pub(super) fn draw_detail(
     c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, panel: &DetailPanel, detail: Detail,
-    status: &crate::system_info::SystemStatus,
+    status: &crate::system_info::SystemStatus, profile: f64,
 ) {
-    let geometry = detail_geometry(c.h, has_radio(detail));
+    let geometry = detail_geometry(c.h, has_radio(detail), has_link(detail));
     draw_detail_header(c, ctx, &geometry, detail, (panel, status));
 
-    for item in detail_items(panel, detail, status, geometry.body) {
-        draw_item(c, ctx, (panel, status), item);
+    for item in detail_items(panel, detail, status, geometry.body, Some(ctx.painter)) {
+        draw_item(c, ctx, (panel, status, profile), item);
     }
 
+    if !has_link(detail) {
+        return;
+    }
     c.fill(local_rect(QS_PAD, geometry.divider_bottom, c.w - QS_PAD * 2, 1), ctx.theme.line, 0.0);
     let settings = geometry.settings;
     let settings_label = t(match detail {
         Detail::Wifi => Key::QsWifiSettings,
         Detail::Bluetooth => Key::QsBluetoothSettings,
-        Detail::Battery => Key::TbBatterySettings,
+        Detail::Battery | Detail::Power => Key::TbBatterySettings,
         Detail::Sound => Key::QsSoundSettings,
         Detail::Netbird => Key::NbSettings,
     });
@@ -1128,12 +1190,12 @@ pub(super) fn draw_detail(
         ctx.theme.label,
         &super::QS_LABEL,
     );
-    super::draw_qs_chevron(c, ctx, chevron, (false, ctx.hovered == Some(Slot::QsDetailSettings)));
+    super::draw_qs_chevron(c, ctx, chevron, ctx.theme.faint);
 }
 
 fn draw_item(
-    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, (panel, status): (&DetailPanel, &crate::system_info::SystemStatus),
-    item: DetailItem,
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>,
+    (panel, status, profile): (&DetailPanel, &crate::system_info::SystemStatus, f64), item: DetailItem,
 ) {
     let rect = item.rect;
     match item.kind {
@@ -1166,15 +1228,173 @@ fn draw_item(
                 draw_audio_card(c, ctx, rect, device, panel.status_for(&device.name));
             }
         }
-        ItemKind::Diag(index) => draw_diag(c, ctx, rect, index, status),
-        ItemKind::Profile(profile) => draw_profile_card(c, ctx, rect, profile, status.power_profile == Some(profile)),
-        ItemKind::ChargeLimit => {
-            if let Some(limit) = panel.charge.as_ref() {
-                draw_charge_card(c, ctx, rect, limit, panel.status_for(CHARGE_LIMIT_KEY));
+        ItemKind::BatteryHero => draw_battery_hero(c, ctx, rect, status),
+        ItemKind::Segments => draw_segments(c, ctx, rect, (status.power_profile, profile)),
+        ItemKind::Segment(_) => {}
+        ItemKind::SegmentsHint => {
+            if let Some(active) = status.power_profile {
+                let lines = crate::notifications::wrap_lines(
+                    ctx.painter,
+                    t(profile_hint(active)),
+                    &super::QS_NOTE,
+                    rect.size.w - SP2 * 2,
+                    2,
+                );
+                let line_h = super::QS_NOTE.line_height_px as i32;
+                for (index, line) in (0..).zip(lines) {
+                    let top = rect.loc.y + SP2 + index * line_h;
+                    let band = (rect.loc.x + SP2, rect.loc.x + rect.size.w - SP2, top, top + line_h);
+                    c.text(ctx.painter, band, TextAlign::Left, &line, ctx.theme.muted, &super::QS_NOTE);
+                }
             }
         }
+        ItemKind::PowerRow(action) => draw_power_row(c, ctx, rect, action, panel.armed == Some(action)),
+        ItemKind::PowerSeparator => {
+            c.fill(local_rect(rect.loc.x, rect.loc.y + SP1, rect.size.w, 1), ctx.theme.line, 0.0);
+        }
+        ItemKind::PowerConfirm(action) => draw_power_confirm(c, ctx, rect, action, &panel.apps),
         ItemKind::Netbird(item) => netbird::draw(c, ctx, rect, item, &panel.netbird),
     }
+}
+
+fn draw_battery_hero(
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, status: &crate::system_info::SystemStatus,
+) {
+    let Some(pct) = status.battery_pct else {
+        return;
+    };
+    let theme = ctx.theme;
+    let low = battery_low(theme, status);
+    let top = rect.loc.y + SP1;
+    let pct_text = super::qs_percent(pct);
+    let left = rect.loc.x + SP2;
+    let pct_w = text_w(ctx.painter, &pct_text, &super::QS_BATTERY_PCT);
+    let line_h = super::QS_BATTERY_PCT.line_height_px as i32;
+    let ink = if low { theme.danger } else { theme.label };
+    c.text(
+        ctx.painter,
+        (left, left + pct_w, top, top + line_h),
+        TextAlign::Left,
+        &pct_text,
+        ink,
+        &super::QS_BATTERY_PCT,
+    );
+    let (w, h) = (super::battery::CARD_W, super::battery::CARD_H);
+    let right = rect.loc.x + rect.size.w - SP2;
+    let cell = super::battery::Cell::new(right - w, top + (line_h - h) / 2, w, h);
+    let fill = if low {
+        theme.danger
+    } else if status.battery_charging {
+        theme.ok
+    } else {
+        theme.label
+    };
+    super::battery::draw(
+        c,
+        &cell,
+        super::battery::Look { pct, charging: status.battery_charging, ink: theme.label, fill },
+    );
+    let text_left = left + pct_w + SP3;
+    let text_right = cell.body.loc.x - SP3;
+    let name_h = CARD_PRIMARY.line_height_px as i32;
+    let sub_h = super::QS_NOTE.line_height_px as i32;
+    let text_top = top + (line_h - name_h - sub_h) / 2;
+    let state = t(if status.battery_charging { Key::TbBatteryCharging } else { Key::TbBatteryOnBattery });
+    c.text(
+        ctx.painter,
+        (text_left, text_right, text_top, text_top + name_h),
+        TextAlign::Left,
+        state,
+        theme.label,
+        &CARD_PRIMARY,
+    );
+    let line = battery_head_line(status);
+    let band = (text_left, text_right, text_top + name_h, text_top + name_h + sub_h);
+    c.text(ctx.painter, band, TextAlign::Left, &line, theme.muted, &super::QS_NOTE);
+}
+
+fn draw_segments(
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, track: LocalRect, (active, position): (Option<PowerProfile>, f64),
+) {
+    let theme = ctx.theme;
+    c.fill(track, theme.track_soft, R2);
+    let segments = segment_rects(track);
+    if active.is_some() {
+        let (first, second) = (segments[0].1, segments[1].1);
+        let step = f64::from(second.loc.x - first.loc.x);
+        let x = first.loc.x + (step * position.clamp(0.0, 2.0)).round() as i32;
+        c.fill(local_rect(x, first.loc.y, first.size.w, first.size.h), theme.track, R1);
+    }
+    for (profile, rect) in segments {
+        let colour = if active == Some(profile) { theme.label } else { theme.muted };
+        let label = t(super::power_profile_label(profile));
+        let content = SEGMENT_ICON + SP1 + SP1 / 2 + text_w(ctx.painter, label, &super::QS_PILL_TEXT);
+        let x = (rect.loc.x + (rect.size.w - content) / 2).max(rect.loc.x + SP1);
+        let icon = local_rect(x, rect.loc.y + (rect.size.h - SEGMENT_ICON) / 2, SEGMENT_ICON, SEGMENT_ICON);
+        super::qs_symbol(
+            c,
+            icon,
+            (super::power_profile_icon(profile), crate::paint::draw_power_glyph_over),
+            SEGMENT_ICON,
+            colour,
+        );
+        let band =
+            (x + SEGMENT_ICON + SP1 + SP1 / 2, rect.loc.x + rect.size.w - SP1, rect.loc.y, rect.loc.y + rect.size.h);
+        c.text(ctx.painter, band, TextAlign::Left, label, colour, &super::QS_PILL_TEXT);
+    }
+}
+
+fn draw_power_row(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, action: PowerAction, armed: bool) {
+    let theme = ctx.theme;
+    let (icon_ink, label_ink) = if armed { (theme.danger, theme.danger) } else { (theme.muted, theme.label) };
+    let icon = local_rect(rect.loc.x + CARD_PAD_X, rect.loc.y + (rect.size.h - MENU_ICON) / 2, MENU_ICON, MENU_ICON);
+    super::qs_symbol(c, icon, (power_icon(action), power_glyph(action)), MENU_ICON, icon_ink);
+    let (top, bottom) = (rect.loc.y, rect.loc.y + rect.size.h);
+    let left = icon.loc.x + MENU_ICON + CARD_PAD_X;
+    let mut right = rect.loc.x + rect.size.w - CARD_PAD_X;
+    if action == PowerAction::Lock {
+        let keycap = "Super+L";
+        let width = text_w(ctx.painter, keycap, &KEYCAP);
+        c.text(ctx.painter, (right - width, right, top, bottom), TextAlign::Right, keycap, theme.faint, &KEYCAP);
+        right -= width + SP2;
+    }
+    c.text(ctx.painter, (left, right, top, bottom), TextAlign::Left, t(power_row_label(action)), label_ink, &MENU_ITEM);
+}
+
+fn draw_power_confirm(
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, action: PowerAction, apps: &[String],
+) {
+    let theme = ctx.theme;
+    let card = local_rect(rect.loc.x, rect.loc.y + SP1 / 2, rect.size.w, rect.size.h - SP1 / 2 - SP2);
+    c.fill(card, theme.danger_soft, R2);
+    let (left, right) = (card.loc.x + CONFIRM_PAD, card.loc.x + card.size.w - CONFIRM_PAD);
+    let mut y = card.loc.y + CONFIRM_PAD;
+    let title_h = super::QS_TITLE.line_height_px as i32;
+    c.text(
+        ctx.painter,
+        (left, right, y, y + title_h),
+        TextAlign::Left,
+        t(power_question(action)),
+        theme.label,
+        &super::QS_TITLE,
+    );
+    y += title_h + SP2;
+    let line_h = super::QS_NOTE.line_height_px as i32;
+    for line in crate::notifications::wrap_lines(
+        ctx.painter,
+        &apps_note(apps),
+        &super::QS_NOTE,
+        right - left,
+        CONFIRM_NOTE_LINES,
+    ) {
+        c.text(ctx.painter, (left, right, y, y + line_h), TextAlign::Left, &line, theme.muted, &super::QS_NOTE);
+        y += line_h;
+    }
+    let (cancel, confirm) = confirm_buttons(ctx.painter, rect, action);
+    c.fill(cancel, theme.track_soft, R2);
+    c.text_in(ctx.painter, cancel, TextAlign::Center, t(Key::PowerCancel), theme.label, &super::QS_PILL_TEXT);
+    c.fill(confirm, theme.danger, R2);
+    c.text_in(ctx.painter, confirm, TextAlign::Center, t(power_verb(action)), theme.view_bg, &super::QS_PILL_TEXT);
 }
 
 fn battery_low(theme: &TopbarTheme, status: &crate::system_info::SystemStatus) -> bool {
@@ -1187,104 +1407,38 @@ fn draw_detail_header(
 ) {
     let theme = ctx.theme;
     let back = geometry.back;
-    c.fill(back, theme.track_soft, R2);
-    let colour = if ctx.hovered == Some(Slot::QsBack) { theme.label } else { theme.muted };
     let side = DETAIL_BACK_ICON;
     let at = (back.loc.x + (back.size.w - side) / 2, back.loc.y + (back.size.h - side) / 2);
-    if !c.icon("go-previous", side, at, colour) {
-        c.text_in(ctx.painter, back, TextAlign::Center, "\u{2039}", colour, &TextStyle::HEAD);
+    if !c.icon("go-previous", side, at, theme.label) {
+        c.text_in(ctx.painter, back, TextAlign::Center, "\u{2039}", theme.label, &TextStyle::HEAD);
     }
     let title = t(match detail {
-        Detail::Wifi => Key::WiFi,
+        Detail::Wifi => Key::QsNetwork,
         Detail::Bluetooth => Key::Bluetooth,
-        Detail::Battery => Key::TbBattery,
+        Detail::Battery => Key::QsBatteryTitle,
         Detail::Sound => Key::SettingsSound,
-        Detail::Netbird => Key::Netbird,
+        Detail::Netbird => Key::QsVpn,
+        Detail::Power => Key::QsPowerTitle,
     });
-    let (top, bottom) = (back.loc.y, back.loc.y + back.size.h);
+    let top = QS_PAD;
+    let bottom = top + DETAIL_HEAD;
     let title_band = (geometry.title_left, geometry.title_right, top, bottom);
-    c.text(ctx.painter, title_band, TextAlign::Left, title, theme.label, &TextStyle::HEAD);
+    c.text(ctx.painter, title_band, TextAlign::Left, title, theme.label, &super::QS_TITLE_PAGE);
     if !has_radio(detail) {
-        let (pct, colour) = if detail == Detail::Sound {
-            let colour = if status.volume_muted { theme.danger } else { theme.muted };
-            (format!("{}%", status.volume_pct), colour)
-        } else {
-            let pct = status.battery_pct.map_or_else(String::new, |pct| format!("{pct}%"));
-            (pct, if battery_low(theme, status) { theme.danger } else { theme.muted })
-        };
-        let pct_band = (geometry.title_right + SP2, QS_WIDTH - QS_PAD, top, bottom);
-        c.text(ctx.painter, pct_band, TextAlign::Right, &pct, colour, &super::QS_READOUT);
+        if detail == Detail::Sound {
+            let text = if status.volume_muted {
+                t(Key::QsMutedShort).to_string()
+            } else {
+                super::qs_percent(status.volume_pct)
+            };
+            let pct_band = (geometry.title_right + SP2, QS_WIDTH - QS_PAD, top, bottom);
+            c.text(ctx.painter, pct_band, TextAlign::Right, &text, theme.muted, &super::QS_READOUT);
+        }
         return;
     }
     let position = f64::from(u8::from(radio_on(detail, panel, status)));
     let switch = SwitchMotion { thumb: position, track: position };
     draw_switch(c, theme, geometry.toggle, (DETAIL_SWITCH_INSET, DETAIL_SWITCH_THUMB), switch);
-}
-
-fn tenths(value: u32) -> String {
-    format!("{}.{}", value / 10, value % 10)
-}
-
-fn draw_diag(
-    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, index: usize,
-    status: &crate::system_info::SystemStatus,
-) {
-    let theme = ctx.theme;
-    c.fill(rect, theme.track_soft, R2);
-    c.stroke(rect, 1.0, R2, theme.line);
-    let health = status.battery.map(|info| info.health).unwrap_or_default();
-    let (label, value, unit) = match index {
-        0 => (Key::QsHealth, health.wear_pct.map(|pct| format!("{pct}%")), None),
-        1 => {
-            let forms = [Key::QsCyclesOne, Key::QsCyclesFew, Key::QsCyclesMany];
-            let lang = crate::i18n::language();
-            let unit = crate::i18n::plural_key(lang, health.cycles.map_or(0, u64::from), forms).text(lang);
-            (Key::QsCycles, health.cycles.map(|cycles| cycles.to_string()), Some(unit.to_string()))
-        }
-        2 => (Key::QsDraw, health.draw_dw.map(tenths), Some(t(Key::QsWatts).to_string())),
-        _ => (
-            Key::QsCapacity,
-            health.full_dwh.map(tenths),
-            health.design_dwh.map(|design| t(Key::QsOfWattHours).replace("{}", &tenths(design))),
-        ),
-    };
-    let (left, right) = (rect.loc.x + DIAG_PAD_X, rect.loc.x + rect.size.w - DIAG_PAD_X);
-    let label_top = rect.loc.y + DIAG_PAD_Y;
-    let label_h = super::QS_SUB.line_height_px as i32;
-    c.text(
-        ctx.painter,
-        (left, right, label_top, label_top + label_h),
-        TextAlign::Left,
-        t(label),
-        theme.faint,
-        &super::QS_SUB,
-    );
-    let value_top = label_top + label_h + DIAG_GAP;
-    let band = (value_top, value_top + DIAG_VALUE);
-    let value = value.unwrap_or_else(|| "\u{2014}".to_string());
-    let value_w = text_w(ctx.painter, &value, &super::QS_BATTERY_PCT);
-    c.text(
-        ctx.painter,
-        (left, left + value_w, band.0, band.1),
-        TextAlign::Left,
-        &value,
-        theme.label,
-        &super::QS_BATTERY_PCT,
-    );
-    let after = left + value_w + DIAG_UNIT_GAP;
-    if index == 0 {
-        if let Some(pct) = health.wear_pct {
-            let worn = pct < HEALTHY_PCT;
-            let text = t(if worn { Key::QsWorn } else { Key::QsHealthy });
-            let (well, ink) = if worn { (theme.danger_soft, theme.danger) } else { (theme.ok_soft, theme.ok) };
-            let width = text_w(ctx.painter, text, &DIAG_PILL) + DIAG_PILL_PAD * 2;
-            let pill = local_rect(after, band.0 + (DIAG_VALUE - DIAG_PILL_H) / 2, width, DIAG_PILL_H);
-            c.fill(pill, well, R_ROUND);
-            c.text_in(ctx.painter, pill, TextAlign::Center, text, ink, &DIAG_PILL);
-        }
-    } else if let Some(unit) = unit {
-        c.text(ctx.painter, (after, right, band.0, band.1), TextAlign::Left, &unit, theme.faint, &TextStyle::CAP);
-    }
 }
 
 const fn profile_hint(profile: PowerProfile) -> Key {
@@ -1293,56 +1447,6 @@ const fn profile_hint(profile: PowerProfile) -> Key {
         PowerProfile::Balanced => Key::QsProfileBalancedHint,
         PowerProfile::Performance => Key::QsProfilePerformanceHint,
     }
-}
-
-fn draw_profile_card(
-    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, profile: PowerProfile, active: bool,
-) {
-    let theme = ctx.theme;
-    if active {
-        c.fill(rect, theme.active_soft, R2);
-    } else {
-        c.fill(rect, theme.track_soft, R2);
-        c.stroke(rect, 1.0, R2, theme.line);
-    }
-    let radio = local_rect(rect.loc.x + CARD_PAD_X, rect.loc.y + CARD_PAD_X + 2, RADIO, RADIO);
-    c.stroke(radio, 1.5, R_ROUND, if active { theme.active_background } else { theme.line_2 });
-    if active {
-        let dot = local_rect(
-            radio.loc.x + (RADIO - RADIO_DOT) / 2,
-            radio.loc.y + (RADIO - RADIO_DOT) / 2,
-            RADIO_DOT,
-            RADIO_DOT,
-        );
-        c.fill(dot, theme.active_background, R_ROUND);
-    }
-    let left = radio.loc.x + RADIO + CARD_GAP;
-    let right = rect.loc.x + rect.size.w - CARD_PAD_X;
-    let (title_colour, hint_colour) = if active {
-        (theme.active_soft_label, super::dimmed(theme.active_soft_label, super::QS_SOFT_DIM))
-    } else {
-        (theme.label, theme.faint)
-    };
-    let top = rect.loc.y + CARD_PAD_X;
-    let title_h = CARD_PRIMARY.line_height_px as i32;
-    c.text(
-        ctx.painter,
-        (left, right, top, top + title_h),
-        TextAlign::Left,
-        t(profile_label(profile)),
-        title_colour,
-        &CARD_PRIMARY,
-    );
-    let hint_top = top + title_h + 2;
-    let hint_h = super::QS_NOTE.line_height_px as i32;
-    c.text(
-        ctx.painter,
-        (left, right, hint_top, hint_top + hint_h),
-        TextAlign::Left,
-        t(profile_hint(profile)),
-        hint_colour,
-        &super::QS_NOTE,
-    );
 }
 
 fn status_trailing(theme: &TopbarTheme, status: RowStatus) -> Option<(String, Color)> {
@@ -1614,46 +1718,6 @@ fn draw_password_field(
     c.fill(caret, theme.active_background, 0.0);
 }
 
-fn draw_charge_card(
-    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, limit: &ChargeLimit, status: RowStatus,
-) {
-    let theme = ctx.theme;
-    card_background(c, theme, rect, false);
-    let switch_x = rect.loc.x + rect.size.w - CARD_PAD_X - DETAIL_SWITCH_W;
-    let switch =
-        local_rect(switch_x, rect.loc.y + (rect.size.h - DETAIL_SWITCH_H) / 2, DETAIL_SWITCH_W, DETAIL_SWITCH_H);
-    let target = if status == RowStatus::Connecting { !limit.enabled } else { limit.enabled };
-    let position = f64::from(u8::from(target));
-    draw_switch(
-        c,
-        theme,
-        switch,
-        (DETAIL_SWITCH_INSET, DETAIL_SWITCH_THUMB),
-        SwitchMotion { thumb: position, track: position },
-    );
-
-    let (left, right) = (rect.loc.x + CARD_PAD_X, switch.loc.x - CARD_GAP);
-    let end = if limit.end == 0 { DEFAULT_CHARGE_END } else { limit.end.min(100) };
-    let title = t(Key::QsChargeLimit).replace("{n}", &end.to_string());
-    let (note, colour) = match status {
-        RowStatus::Connecting => (Key::QsWaitingForAuth, theme.muted),
-        RowStatus::Failed(_) => (Key::QsCouldNotChange, theme.danger),
-        RowStatus::Idle | RowStatus::Disconnecting => (Key::QsChargeLimitHint, theme.faint),
-    };
-    let title_h = CARD_PRIMARY.line_height_px as i32;
-    let note_h = super::QS_NOTE.line_height_px as i32;
-    let top = rect.loc.y + (rect.size.h - title_h - note_h) / 2;
-    c.text(ctx.painter, (left, right, top, top + title_h), TextAlign::Left, &title, theme.label, &CARD_PRIMARY);
-    c.text(
-        ctx.painter,
-        (left, right, top + title_h, top + title_h + note_h),
-        TextAlign::Left,
-        t(note),
-        colour,
-        &super::QS_NOTE,
-    );
-}
-
 fn masked(text: &str) -> String {
     text.chars().map(|_| '\u{2022}').collect()
 }
@@ -1675,9 +1739,10 @@ mod tests {
         };
         let body = local_rect(0, 0, 300, DETAIL_SECTION + SP3 + DETAIL_CARD);
         let status = crate::system_info::SystemStatus::default();
-        assert!(!detail_items(&panel, Detail::Sound, &status, body).iter().any(|item| item.kind == ItemKind::Input(0)));
+        let input = |item: &DetailItem| item.kind == ItemKind::Input(0);
+        assert!(!detail_items(&panel, Detail::Sound, &status, body, None).iter().any(input));
         panel.sound_scroll = 3;
-        let items = detail_items(&panel, Detail::Sound, &status, body);
+        let items = detail_items(&panel, Detail::Sound, &status, body, None);
         assert!(items.iter().any(|item| item.kind == ItemKind::Input(0)));
     }
 
@@ -1722,9 +1787,9 @@ mod tests {
         let mut bar = Topbar::new(TopbarTheme::default());
         bar.toggle_popup(OpenPopup::QuickSettings);
         relayout(&mut bar);
-        let more = bar.slot_rect(Slot::QsWifiMore).expect("card slot");
-        let badge = bar.slot_rect(Slot::QsWifi).expect("badge slot");
-        assert!(more.contains(badge.loc), "the toggle is the badge inside the card");
+        let more = bar.slot_rect(Slot::QsWifiMore).expect("chevron slot");
+        let body = bar.slot_rect(Slot::QsWifi).expect("tile slot");
+        assert!(body.loc.x + body.size.w <= more.loc.x, "the chevron sits after the tile body");
         assert_eq!(bar.action_at(centre(more)), Some(TopbarAction::QsPanel(PanelAction::Open(Detail::Wifi))));
 
         assert!(bar.open_detail(Detail::Wifi));
@@ -1783,8 +1848,8 @@ mod tests {
     #[test]
     fn each_view_groups_its_cards_under_section_labels() {
         let bar = open_wifi();
-        let geometry = detail_geometry(qs_geometry(&bar.qs_shape(None)).height, true);
-        let items = detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), geometry.body);
+        let geometry = detail_geometry(qs_geometry(&bar.qs_shape(None)).height, true, true);
+        let items = detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), geometry.body, None);
         let kinds: Vec<ItemKind> = items.iter().map(|item| item.kind).collect();
         assert_eq!(
             kinds,
@@ -1803,14 +1868,13 @@ mod tests {
             power_profile: Some(PowerProfile::Balanced),
             ..Default::default()
         };
-        let battery = detail_items(&bar.qs_panel, Detail::Battery, &status, geometry.body);
-        let diag = battery.iter().filter(|item| matches!(item.kind, ItemKind::Diag(_))).count();
+        let battery = detail_items(&bar.qs_panel, Detail::Battery, &status, geometry.body, None);
+        assert_eq!(battery[0].kind, ItemKind::BatteryHero);
         let profiles: Vec<Option<Slot>> =
-            battery.iter().filter(|item| matches!(item.kind, ItemKind::Profile(_))).map(|item| item.slot).collect();
-        assert_eq!(diag, 4, "a two by two telemetry grid");
+            battery.iter().filter(|item| matches!(item.kind, ItemKind::Segment(_))).map(|item| item.slot).collect();
         assert_eq!(profiles, super::super::QS_PROFILES.map(|profile| Some(Slot::QsProfile(profile))));
         let off = crate::system_info::SystemStatus { wifi_enabled: false, ..status };
-        let wifi_off = detail_items(&bar.qs_panel, Detail::Wifi, &off, geometry.body);
+        let wifi_off = detail_items(&bar.qs_panel, Detail::Wifi, &off, geometry.body, None);
         assert_eq!(wifi_off.iter().map(|item| item.kind).collect::<Vec<_>>(), [ItemKind::Message(Key::QsWifiIsOff)]);
     }
 
@@ -1931,16 +1995,20 @@ mod tests {
     }
 
     #[test]
-    fn every_power_button_is_laid_out_and_reports_its_action() {
+    fn every_power_row_is_laid_out_in_order_and_reports_its_action() {
         let mut bar = Topbar::new(TopbarTheme::default());
         bar.toggle_popup(OpenPopup::QuickSettings);
+        bar.open_detail(Detail::Power);
         relayout(&mut bar);
-        let mut previous_right = i32::MIN;
-        for action in POWER_ROW {
-            let rect = bar.slot_rect(Slot::QsPowerButton(action)).expect("power button");
-            assert!(rect.loc.x > previous_right);
-            previous_right = rect.loc.x + rect.size.w;
-            assert_eq!(bar.action_at(centre(rect)), Some(TopbarAction::QsArmPower(action)));
+        let mut previous_bottom = i32::MIN;
+        for action in POWER_ROWS {
+            let rect = bar.slot_rect(Slot::QsPowerButton(action)).expect("power row");
+            assert!(rect.loc.y >= previous_bottom);
+            assert_eq!(rect.size.h, MENU_ROW);
+            previous_bottom = rect.loc.y + rect.size.h;
+            let expected =
+                if is_destructive(action) { TopbarAction::QsArmPower(action) } else { TopbarAction::QsPower(action) };
+            assert_eq!(bar.action_at(centre(rect)), Some(expected));
         }
     }
 
@@ -1988,8 +2056,7 @@ mod tests {
         let status =
             crate::system_info::SystemStatus { battery_pct: Some(40), battery_charging: true, ..Default::default() };
         assert_eq!(battery_state_line(&status), t(Key::TbBatteryCharging));
-        assert!(radio_on(Detail::Battery, &DetailPanel::default(), &status));
-        assert!(!has_radio(Detail::Battery));
+        assert!(!has_radio(Detail::Battery) && !has_radio(Detail::Power));
         assert_eq!(more_slot(Detail::Battery), Slot::QsBattery);
     }
 
@@ -2038,9 +2105,9 @@ mod tests {
 
     #[test]
     fn the_detail_list_stays_inside_the_popup() {
-        let height = qs_geometry(&super::super::QsShape::default()).height;
+        let height = super::super::qs_page_height(qs_geometry(&super::super::QsShape::default()).height);
         for radio in [true, false] {
-            let geometry = detail_geometry(height, radio);
+            let geometry = detail_geometry(height, radio, true);
             assert!(geometry.body.size.h >= (DETAIL_CARD + DETAIL_CARD_GAP) * 6, "room for a useful list");
             assert!(geometry.body.loc.y + geometry.body.size.h < geometry.divider_bottom);
             assert_eq!(geometry.settings.loc.y + geometry.settings.size.h, height - QS_PAD);
@@ -2048,7 +2115,7 @@ mod tests {
             assert!(geometry.body.loc.y > geometry.back.loc.y + geometry.back.size.h);
         }
         assert_eq!(
-            detail_geometry(height, true).toggle.size,
+            detail_geometry(height, true, true).toggle.size,
             smithay::utils::Size::from((DETAIL_SWITCH_W, DETAIL_SWITCH_H))
         );
         assert_eq!(prompt_height(true) - prompt_height(false), PROMPT_ERROR + SP2);
@@ -2073,7 +2140,6 @@ mod tests {
         bar.apply_net_event(NetEvent::Bluetooth(vec![device("aa", true, Some(80)), device("bb", false, None)]));
         bar.apply_net_event(two_sinks());
         bar.apply_net_event(NetEvent::Inputs(Vec::new()));
-        bar.apply_net_event(NetEvent::ChargeLimit(Some(charge_limit(true))));
         assert!(bar.toggle_reveal());
         bar.begin_connect("hdmi");
         let status = crate::system_info::SystemStatus {
@@ -2094,12 +2160,15 @@ mod tests {
         connect_netbird(&mut bar);
         let painter = crate::paint::Painter::new(14.0, None);
         let theme = TopbarTheme::default();
-        let height = qs_geometry(&bar.qs_shape(None)).height;
-        for detail in [Detail::Wifi, Detail::Bluetooth, Detail::Sound, Detail::Battery, Detail::Netbird] {
+        bar.qs_panel.armed = Some(PowerAction::ShutDown);
+        bar.qs_panel.apps = vec!["Firefox".into()];
+        let height = super::super::qs_page_height(qs_geometry(&bar.qs_shape(None)).height);
+        let details = [Detail::Wifi, Detail::Bluetooth, Detail::Sound, Detail::Battery, Detail::Netbird, Detail::Power];
+        for detail in details {
             for (scale, hovered) in [(1, None), (2, Some(Slot::QsPromptCancel)), (2, Some(Slot::QsDetailSettings))] {
                 let ctx = QsRenderContext { painter: &painter, theme: &theme, hovered };
                 let mut canvas = Canvas::new(QS_WIDTH, height, scale).expect("detail canvas");
-                draw_detail(&mut canvas, &ctx, &bar.qs_panel, detail, &status);
+                draw_detail(&mut canvas, &ctx, &bar.qs_panel, detail, &status, 0.5);
             }
         }
     }
@@ -2135,13 +2204,13 @@ mod tests {
         let mut bar = Topbar::new(TopbarTheme::default());
         connect_netbird(&mut bar);
         let kinds_in = |height: i32| -> Vec<ItemKind> {
-            let body = detail_geometry(height, has_radio(Detail::Netbird)).body;
-            detail_items(&bar.qs_panel, Detail::Netbird, &bar.system_status, body)
+            let body = detail_geometry(height, has_radio(Detail::Netbird), true).body;
+            detail_items(&bar.qs_panel, Detail::Netbird, &bar.system_status, body, None)
                 .into_iter()
                 .map(|item| item.kind)
                 .collect()
         };
-        let short = kinds_in(qs_geometry(&bar.qs_shape(None)).height);
+        let short = kinds_in(super::super::qs_page_height(qs_geometry(&bar.qs_shape(None)).height));
         assert!(
             !matches!(short.last(), Some(ItemKind::Section(_))),
             "a section never closes the panel without a card under it: {short:?}"
@@ -2171,55 +2240,14 @@ mod tests {
     fn a_stopped_netbird_service_shows_only_the_status_card() {
         let mut bar = Topbar::new(TopbarTheme::default());
         bar.set_netbird_installed(true);
-        let body = detail_geometry(600, true).body;
-        let loading = detail_items(&bar.qs_panel, Detail::Netbird, &bar.system_status, body);
+        let body = detail_geometry(600, true, true).body;
+        let loading = detail_items(&bar.qs_panel, Detail::Netbird, &bar.system_status, body, None);
         assert_eq!(loading.iter().map(|item| item.kind).collect::<Vec<_>>(), [ItemKind::Message(Key::NbLoading)]);
         bar.apply_netbird(NetbirdUpdate::Status(Box::new(glide_netbird::Status::unavailable())));
-        let down = detail_items(&bar.qs_panel, Detail::Netbird, &bar.system_status, body);
+        let down = detail_items(&bar.qs_panel, Detail::Netbird, &bar.system_status, body, None);
         assert_eq!(down.len(), 1);
         assert_eq!(down[0].slot, None, "nothing to click while the daemon is away");
         assert!(!radio_on(Detail::Netbird, &bar.qs_panel, &bar.system_status));
-    }
-
-    fn charge_limit(enabled: bool) -> ChargeLimit {
-        ChargeLimit { path: "/org/freedesktop/UPower/devices/battery_BAT1".to_string(), enabled, end: 80 }
-    }
-
-    fn open_battery() -> Topbar {
-        let mut bar = Topbar::new(TopbarTheme::default());
-        bar.set_system_status(crate::system_info::SystemStatus {
-            battery_pct: Some(60),
-            power_profile: Some(PowerProfile::Balanced),
-            ..Default::default()
-        });
-        bar.toggle_popup(OpenPopup::QuickSettings);
-        relayout(&mut bar);
-        assert!(bar.open_detail(Detail::Battery));
-        relayout(&mut bar);
-        bar
-    }
-
-    #[test]
-    fn the_charge_limit_card_shows_only_where_upower_supports_it() {
-        let mut bar = open_battery();
-        assert!(bar.slot_rect(Slot::QsChargeLimit).is_none(), "no supported battery, no switch");
-        assert_eq!(bar.charge_limit(), None);
-        assert!(bar.apply_net_event(NetEvent::ChargeLimit(Some(charge_limit(false)))));
-        assert!(!bar.apply_net_event(NetEvent::ChargeLimit(Some(charge_limit(false)))), "an unchanged reading");
-        relayout(&mut bar);
-        let card = bar.slot_rect(Slot::QsChargeLimit).expect("charge limit card");
-        let last_profile = bar.slot_rect(Slot::QsProfile(PowerProfile::Performance)).expect("profiles");
-        assert!(card.loc.y > last_profile.loc.y + last_profile.size.h);
-        assert!(card.loc.y + card.size.h < bar.slot_rect(Slot::QsDetailSettings).expect("settings").loc.y);
-        assert_eq!(bar.action_at(centre(card)), Some(TopbarAction::QsPanel(PanelAction::ChargeLimit)));
-        assert_eq!(bar.charge_limit(), Some(charge_limit(false)));
-
-        bar.begin_connect(CHARGE_LIMIT_KEY);
-        assert_eq!(bar.qs_panel.status_for(CHARGE_LIMIT_KEY), RowStatus::Connecting);
-        bar.apply_net_event(NetEvent::ChargeLimitResult(Err(ConnectError::Failed)));
-        assert_eq!(bar.qs_panel.status_for(CHARGE_LIMIT_KEY), RowStatus::Failed(ConnectError::Failed));
-        bar.close_detail();
-        assert_eq!(bar.charge_limit(), None, "only the Battery view offers it");
     }
 
     #[test]
@@ -2253,12 +2281,5 @@ mod tests {
         assert!(!bar.qs_panel.prompt.as_ref().expect("prompt").reveal);
         bar.prompt_key(FieldKey::Cancel);
         assert!(!bar.toggle_reveal(), "no field, nothing to show");
-    }
-
-    #[test]
-    fn telemetry_values_read_in_tenths() {
-        assert_eq!(tenths(84), "8.4");
-        assert_eq!(tenths(525), "52.5");
-        assert_eq!(tenths(0), "0.0");
     }
 }

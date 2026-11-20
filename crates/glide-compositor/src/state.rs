@@ -2088,7 +2088,7 @@ impl GlideState {
         self.queue_redraw();
     }
 
-    fn update_system_status(&mut self, update: impl FnOnce(&mut crate::system_info::SystemStatus)) {
+    pub(crate) fn update_system_status(&mut self, update: impl FnOnce(&mut crate::system_info::SystemStatus)) {
         let mut status = self.topbar.system_status().clone();
         update(&mut status);
         self.topbar.set_system_status(status);
@@ -2107,6 +2107,7 @@ impl GlideState {
                     status.wifi_ssid = crate::i18n::t(label).to_string();
                 });
             }
+            TopbarAction::QsToggleNetworking => self.toggle_networking(),
             TopbarAction::QsToggleBluetooth => {
                 let was_on = self.topbar.system_status().bluetooth_on;
                 crate::system_info::set_bluetooth(!was_on);
@@ -2137,7 +2138,8 @@ impl GlideState {
             }
             TopbarAction::QsToggleDarkTheme => self.toggle_dark_theme(),
             TopbarAction::QsArmPower(power) => {
-                self.topbar.arm_power(power);
+                let apps = self.open_app_names();
+                self.topbar.arm_power(power, apps);
             }
             TopbarAction::QsDisarmPower => {
                 self.topbar.disarm_power();
@@ -2166,11 +2168,6 @@ impl GlideState {
                     status.mic_pct = pct;
                     status.mic_muted = pct == 0;
                 });
-            }
-            TopbarAction::QsToggleDrawer(drawer) => {
-                if self.topbar.toggle_drawer(drawer) && self.topbar.drawer().is_some() {
-                    crate::qs_net::request(crate::qs_net::scan_drawer(drawer));
-                }
             }
             TopbarAction::QsUseDevice(drawer, index) => {
                 if let Some(device) = self.topbar.drawer_device(drawer, index).filter(|device| !device.active) {

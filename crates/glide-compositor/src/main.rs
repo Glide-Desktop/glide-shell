@@ -527,7 +527,6 @@ fn init_topbar_clock(event_loop: &mut EventLoop<'static, GlideState>, state: &mu
             let night = state.tick_night_light();
             let appearance = state.tick_appearance_schedule();
             let plates = state.tick_icon_plates();
-            let power = state.tick_qs_power();
             let netbird = state.tick_netbird();
             let dock_icons = state.dock.icons.expire_missing();
             let shell_icons = state.launcher_icons.expire_missing();
@@ -536,7 +535,7 @@ fn init_topbar_clock(event_loop: &mut EventLoop<'static, GlideState>, state: &mu
             }
             state.keep_launcher_catalogue();
             state.tick_keychain_idle(std::time::Instant::now());
-            if clock || expired || night || appearance || plates || power || netbird || dock_icons || shell_icons {
+            if clock || expired || night || appearance || plates || netbird || dock_icons || shell_icons {
                 state.queue_redraw();
             }
             TimeoutAction::ToDuration(std::time::Duration::from_secs(1))

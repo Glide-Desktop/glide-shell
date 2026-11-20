@@ -122,15 +122,6 @@ pub struct AudioOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChargeLimit {
-    pub path: String,
-    pub enabled: bool,
-    pub end: u32,
-}
-
-pub const CHARGE_LIMIT_KEY: &str = "charge-limit";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetEvent {
     Wifi(Vec<WifiNetwork>),
     WifiResult { ssid: String, result: Result<(), ConnectError> },
@@ -140,6 +131,4 @@ pub enum NetEvent {
     OutputResult { name: String, result: Result<(), ConnectError> },
     Inputs(Vec<AudioOutput>),
     InputResult { name: String, result: Result<(), ConnectError> },
-    ChargeLimit(Option<ChargeLimit>),
-    ChargeLimitResult(Result<(), ConnectError>),
 }

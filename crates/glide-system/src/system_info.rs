@@ -1059,6 +1059,10 @@ pub fn set_wifi(on: bool) {
     let _ = run("nmcli", &["radio", "wifi", if on { "on" } else { "off" }]);
 }
 
+pub fn set_networking(on: bool) {
+    let _ = run("nmcli", &["networking", if on { "on" } else { "off" }]);
+}
+
 pub const BLUETOOTH_ON: &str = "rfkill unblock bluetooth; i=0; \
     while [ $i -lt 25 ] && ! timeout 1 bluetoothctl list 2>/dev/null | grep -q '^Controller'; do \
     sleep 0.2; i=$((i+1)); done; timeout 10 bluetoothctl power on";

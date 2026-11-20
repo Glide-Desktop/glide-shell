@@ -354,7 +354,44 @@ glide_app::catalogue! {
     QsDisconnecting => "Disconnecting…", "Відключення…";
     QsOn => "On", "Увімк.";
     QsOff => "Off", "Вимк.";
-    QsDarkTheme => "Dark Style", "Темна тема";
+    QsDarkTheme => "Dark Style", "Темний стиль";
+    QsMutedShort => "off", "вимк.";
+    QsNetwork => "Network", "Мережа";
+    QsVpn => "VPN", "VPN";
+    QsOffLong => "Off", "Вимкнено";
+    QsOnLong => "On", "Увімкнено";
+    QsNotConnected => "Not connected", "Не під\u{2019}єднано";
+    QsEthernetShort => "Ethernet", "Ethernet";
+    QsDndOnSub => "Notifications wait", "Сповіщення чекають";
+    QsAwakeSub => "Screen stays on", "Екран не згасне";
+    QsStayAwake => "Stay Awake", "Не засинати";
+    QsDeviceOne => "{n} device", "{n} пристрій";
+    QsDeviceFew => "{n} devices", "{n} пристрої";
+    QsDeviceMany => "{n} devices", "{n} пристроїв";
+    QsStripMic => "Microphone", "Мікрофон";
+    QsStripMicBy => " \u{b7} {app} is listening", " \u{b7} його слухає {app}";
+    QsStripCamera => "Camera", "Камера";
+    QsStripCameraBy => " \u{b7} {app} is using it", " \u{b7} її використовує {app}";
+    QsStripScreen => "Screen", "Екран";
+    QsStripScreenBy => " \u{b7} {app} can see it", " \u{b7} його бачить {app}";
+    QsBatteryLeftShort => "{} left", "ще {}";
+    QsBatteryFullShort => "full in {}", "повна за {}";
+    QsPowerTitle => "Power", "Живлення";
+    QsPowerMode => "Power mode", "Режим живлення";
+    QsBatteryTitle => "Battery", "Батарея";
+    QsLockScreen => "Lock Screen", "Заблокувати екран";
+    QsSleepRow => "Sleep", "Сон";
+    QsLogOutRow => "Log Out\u{2026}", "Вийти з сеансу\u{2026}";
+    QsRestartRow => "Restart\u{2026}", "Перезапустити\u{2026}";
+    QsShutDownRow => "Shut Down\u{2026}", "Вимкнути\u{2026}";
+    QsAskLogOutShort => "Log out?", "Вийти з сеансу?";
+    QsAskRestartShort => "Restart the computer?", "Перезапустити комп\u{2019}ютер?";
+    QsAskShutDownShort => "Shut down the computer?", "Вимкнути комп\u{2019}ютер?";
+    QsAppsWillClose => "{apps} will be asked to close. If they have unsaved work, they will ask.", "{apps} попросять закритися. Якщо в них є незбережене, вони спитають самі.";
+    QsNoAppsOpen => "No apps are open, nothing will be lost.", "Відкритих програм немає, нічого не загубиться.";
+    QsAnd => "and", "і";
+    QsAndMore => "and {n} more", "і ще {n}";
+    QsConfirmShutDown => "Shut Down", "Вимкнути";
     QsScreenshot => "Screenshot", "Знімок екрана";
     QsDisplay => "Display", "Дисплей";
     QsProfileSaver => "Saver", "Економія";
@@ -396,9 +433,9 @@ glide_app::catalogue! {
     QsWatts => "W", "Вт";
     QsCapacity => "Full capacity", "Повна ємність";
     QsOfWattHours => "of {} Wh", "з {} Вт\u{b7}год";
-    QsProfileSaverHint => "Lower clocks for longer battery life", "Знижує частоти для довшої роботи від батареї";
-    QsProfileBalancedHint => "Balances power use and responsiveness", "Збалансовує споживання та швидкість відгуку";
-    QsProfilePerformanceHint => "Top clocks for heavy work", "Найвищі частоти для важких задач";
+    QsProfileSaverHint => "The processor holds back so the battery lasts longer.", "Процесор стримується, щоб батарея протрималась довше.";
+    QsProfileBalancedHint => "Everyday work: speed when needed, quiet when not.", "Звичайна робота: швидкодія, коли треба, тиша, коли ні.";
+    QsProfilePerformanceHint => "The processor is not held back. The battery drains faster and the fan is louder.", "Процесор не стримується. Батарея сяде швидше, вентилятор чутніше.";
     QsChargeLimit => "Limit charging to {n}%", "Обмежити заряджання до {n}%";
     QsChargeLimitHint => "Keeps the battery healthy on mains power", "Береже акумулятор, поки ноутбук від мережі";
     QsWaitingForAuth => "Waiting for permission…", "Очікування дозволу…";
@@ -763,11 +800,12 @@ mod tests {
 
     #[test]
     fn only_micro_labels_are_uppercase_in_the_catalogue() {
+        let acronyms = ["VPN"];
         for key in Key::ALL {
             for text in [key.uk(), key.en()] {
                 let letters: Vec<char> = text.chars().filter(|c| c.is_alphabetic()).collect();
                 assert!(
-                    letters.len() <= 2 || letters.iter().any(|c| c.is_lowercase()),
+                    letters.len() <= 2 || acronyms.contains(&text) || letters.iter().any(|c| c.is_lowercase()),
                     "{key:?}: {text} is shouting; uppercase belongs to the MICRO style"
                 );
             }

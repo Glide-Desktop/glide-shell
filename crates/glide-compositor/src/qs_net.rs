@@ -13,9 +13,7 @@ const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 const BLUETOOTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub use glide_system::spawn::{run_with_input, run_with_timeout};
-pub use glide_topbar::qs_net::{
-    AudioOutput, BtDevice, BtKind, CHARGE_LIMIT_KEY, ChargeLimit, ConnectError, NetEvent, Security, WifiNetwork,
-};
+pub use glide_topbar::qs_net::{AudioOutput, BtDevice, BtKind, ConnectError, NetEvent, Security, WifiNetwork};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BtInfo {
@@ -297,73 +295,11 @@ pub fn sort_outputs(outputs: &mut [AudioOutput]) {
     });
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct UpowerBattery {
-    pub path: String,
-    pub kind: u32,
-    pub power_supply: bool,
-    pub supported: bool,
-    pub enabled: bool,
-    pub end: u32,
-}
-
-const UPOWER: &str = "org.freedesktop.UPower";
-const UPOWER_DEVICE: &str = "org.freedesktop.UPower.Device";
-const UPOWER_BATTERY: u32 = 2;
-
-#[must_use]
-pub fn pick_charge_limit(devices: Vec<UpowerBattery>) -> Option<ChargeLimit> {
-    devices
-        .into_iter()
-        .find(|device| device.kind == UPOWER_BATTERY && device.power_supply && device.supported)
-        .map(|device| ChargeLimit { path: device.path, enabled: device.enabled, end: device.end })
-}
-
-fn scan_charge_limit() -> Option<ChargeLimit> {
-    use zbus::blocking::{Connection, Proxy};
-    let bus = Connection::system().ok()?;
-    let manager = Proxy::new(&bus, UPOWER, "/org/freedesktop/UPower", UPOWER).ok()?;
-    let paths: Vec<zbus::zvariant::OwnedObjectPath> = manager.call("EnumerateDevices", &()).ok()?;
-    let devices = paths
-        .into_iter()
-        .filter_map(|path| {
-            let device = Proxy::new(&bus, UPOWER, path.clone(), UPOWER_DEVICE).ok()?;
-            let flag = |name: &str| device.get_property::<bool>(name).unwrap_or(false);
-            let number = |name: &str| device.get_property::<u32>(name).unwrap_or(0);
-            Some(UpowerBattery {
-                path: path.to_string(),
-                kind: number("Type"),
-                power_supply: flag("PowerSupply"),
-                supported: flag("ChargeThresholdSupported"),
-                enabled: flag("ChargeThresholdEnabled"),
-                end: number("ChargeEndThreshold"),
-            })
-        })
-        .collect();
-    pick_charge_limit(devices)
-}
-
-fn set_charge_limit(path: &str, enabled: bool) -> Result<(), ConnectError> {
-    let call = || -> zbus::Result<()> {
-        let bus = zbus::blocking::Connection::system()?;
-        let device = zbus::blocking::Proxy::new(&bus, UPOWER, path.to_string(), UPOWER_DEVICE)?;
-        let flags = zbus::proxy::MethodFlags::AllowInteractiveAuth.into();
-        device.call_with_flags::<_, _, ()>("EnableChargeThreshold", flags, &(enabled,))?;
-        Ok(())
-    };
-    call().map_err(|err| {
-        tracing::info!(enabled, "switching the charge limit failed: {err}");
-        ConnectError::Failed
-    })
-}
-
 pub enum NetRequest {
     ScanWifi,
     ScanBluetooth,
     ScanOutputs,
     ScanInputs,
-    ScanChargeLimit,
-    SetChargeLimit { path: String, enabled: bool },
     ConnectWifi { ssid: String, password: Option<String>, saved: bool },
     DisconnectWifi { ssid: String },
     Bluetooth { mac: String, connect: bool },
@@ -378,8 +314,6 @@ impl std::fmt::Debug for NetRequest {
             Self::ScanBluetooth => f.write_str("ScanBluetooth"),
             Self::ScanOutputs => f.write_str("ScanOutputs"),
             Self::ScanInputs => f.write_str("ScanInputs"),
-            Self::ScanChargeLimit => f.write_str("ScanChargeLimit"),
-            Self::SetChargeLimit { enabled, .. } => f.debug_struct("SetChargeLimit").field("enabled", enabled).finish(),
             Self::UseOutput { name } => f.debug_struct("UseOutput").field("name", name).finish(),
             Self::UseInput { name } => f.debug_struct("UseInput").field("name", name).finish(),
             Self::ConnectWifi { ssid, password, saved } => f
@@ -493,11 +427,6 @@ fn run_request(request: NetRequest) {
         }
         NetRequest::ScanOutputs => emit(NetEvent::Outputs(scan_outputs())),
         NetRequest::ScanInputs => emit(NetEvent::Inputs(scan_inputs())),
-        NetRequest::ScanChargeLimit => emit(NetEvent::ChargeLimit(scan_charge_limit())),
-        NetRequest::SetChargeLimit { path, enabled } => {
-            emit(NetEvent::ChargeLimitResult(set_charge_limit(&path, enabled)));
-            emit(NetEvent::ChargeLimit(scan_charge_limit()));
-        }
         NetRequest::UseOutput { name } => {
             let result = set_default("set-default-sink", &name);
             emit(NetEvent::OutputResult { name, result });
@@ -650,14 +579,6 @@ fn scan_bluetooth() -> Vec<BtDevice> {
 }
 
 #[must_use]
-pub const fn scan_drawer(drawer: crate::topbar::Drawer) -> NetRequest {
-    match drawer {
-        crate::topbar::Drawer::Output => NetRequest::ScanOutputs,
-        crate::topbar::Drawer::Input => NetRequest::ScanInputs,
-    }
-}
-
-#[must_use]
 pub const fn use_device(drawer: crate::topbar::Drawer, name: String) -> NetRequest {
     match drawer {
         crate::topbar::Drawer::Output => NetRequest::UseOutput { name },
@@ -671,8 +592,7 @@ pub const fn scan_for(detail: Detail) -> Option<NetRequest> {
         Detail::Wifi => Some(NetRequest::ScanWifi),
         Detail::Bluetooth => Some(NetRequest::ScanBluetooth),
         Detail::Sound => Some(NetRequest::ScanOutputs),
-        Detail::Battery => Some(NetRequest::ScanChargeLimit),
-        Detail::Netbird => None,
+        Detail::Battery | Detail::Netbird | Detail::Power => None,
     }
 }
 
@@ -714,18 +634,16 @@ impl GlideState {
         }
     }
 
+    pub(crate) fn toggle_networking(&mut self) {
+        let was_on = self.topbar.system_status().ethernet_connected;
+        crate::system_info::set_networking(!was_on);
+        self.update_system_status(|status| status.ethernet_connected = !was_on);
+    }
+
     pub(crate) fn run_power_button(&mut self, action: PowerAction) {
         self.topbar.close_popup();
         self.perform_power_action(action);
         self.queue_redraw();
-    }
-
-    pub fn tick_qs_power(&mut self) -> bool {
-        if let Some(action) = self.topbar.power_due(std::time::Instant::now()) {
-            self.run_power_button(action);
-            return true;
-        }
-        self.topbar.power_counting()
     }
 
     pub(crate) fn run_qs_panel_action(&mut self, action: PanelAction) {
@@ -751,7 +669,7 @@ impl GlideState {
                     request(NetRequest::ScanBluetooth);
                 }
                 Some(Detail::Netbird) => self.toggle_netbird(),
-                Some(Detail::Battery | Detail::Sound) | None => {}
+                Some(Detail::Battery | Detail::Sound | Detail::Power) | None => {}
             },
             PanelAction::Row(index) => {
                 self.activate_detail_row(index);
@@ -760,12 +678,6 @@ impl GlideState {
             PanelAction::FocusPassword => self.topbar.focus_password(),
             PanelAction::PromptReveal => {
                 self.topbar.toggle_reveal();
-            }
-            PanelAction::ChargeLimit => {
-                if let Some(limit) = self.topbar.charge_limit() {
-                    self.topbar.begin_connect(CHARGE_LIMIT_KEY);
-                    request(NetRequest::SetChargeLimit { path: limit.path, enabled: !limit.enabled });
-                }
             }
             PanelAction::PromptCancel => self.run_qs_field_key(crate::topbar::FieldKey::Cancel),
             PanelAction::PromptSubmit => self.run_qs_field_key(crate::topbar::FieldKey::Submit),
@@ -1083,32 +995,14 @@ mod tests {
         assert_eq!(inputs.len(), 1);
         assert!(inputs[0].active);
         assert!(matches!(use_device(crate::topbar::Drawer::Input, "mic".into()), NetRequest::UseInput { .. }));
-        assert!(matches!(scan_drawer(crate::topbar::Drawer::Output), NetRequest::ScanOutputs));
     }
 
     #[test]
-    fn the_charge_limit_belongs_to_the_system_battery_that_supports_it() {
-        let battery = |path: &str, kind: u32, power_supply: bool, supported: bool| UpowerBattery {
-            path: path.to_string(),
-            kind,
-            power_supply,
-            supported,
-            enabled: true,
-            end: 80,
-        };
-        let devices = vec![
-            battery("line_power", 1, true, false),
-            battery("mouse", 2, false, true),
-            battery("bat0", 2, true, false),
-            battery("bat1", 2, true, true),
-        ];
-        let limit = pick_charge_limit(devices).expect("bat1 supports it");
-        assert_eq!(limit, ChargeLimit { path: "bat1".to_string(), enabled: true, end: 80 });
-        assert_eq!(pick_charge_limit(vec![battery("bat0", 2, true, false)]), None);
-        assert!(matches!(scan_for(Detail::Battery), Some(NetRequest::ScanChargeLimit)));
-        assert!(scan_for(Detail::Netbird).is_none(), "the NetBird view is pushed by its own worker");
-        let request = NetRequest::SetChargeLimit { path: "bat1".into(), enabled: false };
-        assert_eq!(format!("{request:?}"), "SetChargeLimit { enabled: false }");
+    fn pages_without_a_list_to_fetch_scan_nothing() {
+        for detail in [Detail::Battery, Detail::Power, Detail::Netbird] {
+            assert!(scan_for(detail).is_none(), "{detail:?}");
+        }
+        assert!(matches!(scan_for(Detail::Wifi), Some(NetRequest::ScanWifi)));
     }
 
     #[test]

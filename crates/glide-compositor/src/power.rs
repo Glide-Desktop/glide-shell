@@ -95,7 +95,7 @@ impl GlideState {
         }
     }
 
-    fn open_app_names(&self) -> Vec<String> {
+    pub(crate) fn open_app_names(&self) -> Vec<String> {
         let index = self.app_directory.index();
         let mut names: Vec<String> = self
             .window_map
