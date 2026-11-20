@@ -65,8 +65,8 @@ mod keychain_view;
 pub use tray::{ICON as TRAY_ICON, IconArt, MAX_SCALE as TRAY_MAX_SCALE, TrayButton, TrayClick, TrayIcon};
 
 pub use panels::{
-    Detail, FieldKey, NetbirdPending, NetbirdUpdate, PanelAction, PromptOutcome, QsKeyMode, RowTarget, field_key,
-    remaining_text,
+    Detail, FieldKey, NetbirdPending, NetbirdUpdate, PanelAction, PromptOutcome, QsKeyMode, Radio, RowTarget,
+    field_key, remaining_text,
 };
 
 pub const HEIGHT: i32 = 34;
@@ -1394,6 +1394,7 @@ impl Topbar {
     fn tile_on(&self, tile: QsTile) -> bool {
         let status = &self.system_status;
         match tile {
+            QsTile::Network | QsTile::Bluetooth if self.tile_pending(tile) => false,
             QsTile::Network if status.wifi_available => status.wifi_enabled && !status.airplane,
             QsTile::Network => status.ethernet_connected,
             QsTile::Bluetooth => status.bluetooth_on,
@@ -1405,6 +1406,14 @@ impl Topbar {
             QsTile::Dnd => self.dnd,
             QsTile::Caffeine => self.caffeinated,
             QsTile::DarkTheme => self.theme.dark,
+        }
+    }
+
+    fn tile_pending(&self, tile: QsTile) -> bool {
+        match tile {
+            QsTile::Network => self.qs_panel.radio_pending(panels::Radio::Wifi),
+            QsTile::Bluetooth => self.qs_panel.radio_pending(panels::Radio::Bluetooth),
+            _ => false,
         }
     }
 
@@ -4032,6 +4041,15 @@ fn push_qs_main<R: ShellRenderer>(
     let (shift, alpha) = qs_main_motion(slide);
     let left = rect.loc.x - shift;
     let geometry = qs_geometry(&shape);
+    if alpha > 0.0 {
+        for &(tile, tile_rect) in &geometry.tiles {
+            if topbar.tile_pending(tile) {
+                let icon = qs_tile_icon(tile_rect);
+                let at = local_rect(icon.loc.x - shift, icon.loc.y, icon.size.w, icon.size.h);
+                panels::push_spinner(topbar, renderer, (rect, at, reveal), (scale, output_scale), elements);
+            }
+        }
+    }
     for (buffer, bounds) in qs_slider_layers(topbar, painter, &geometry, (live, hovered, flags.dragging), output_scale)
     {
         let element = Rectangle::new(Point::from((left + bounds.loc.x, rect.loc.y + bounds.loc.y)), bounds.size);
@@ -4156,6 +4174,11 @@ struct QsTileSpec<'a> {
     subtitle: &'a str,
     icon_name: &'a str,
     glyph: GlyphPainter,
+    pending: bool,
+}
+
+fn qs_tile_icon(rect: LocalRect) -> LocalRect {
+    local_rect(rect.loc.x + QS_TILE_PAD, rect.loc.y + (rect.size.h - QS_TILE_ICON) / 2, QS_TILE_ICON, QS_TILE_ICON)
 }
 
 fn draw_qs_chevron(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, colour: Color) {
@@ -4172,9 +4195,12 @@ fn draw_qs_tile(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, spec: &QsTileSpec
     c.fill(rect, theme.track_soft.lerp(theme.active_soft, lit), R2);
     let ink = theme.label.lerp(theme.active_soft_label, lit);
     let sub_ink = theme.muted.lerp(theme.active_soft_label, lit);
-    let icon =
-        local_rect(rect.loc.x + QS_TILE_PAD, rect.loc.y + (rect.size.h - QS_TILE_ICON) / 2, QS_TILE_ICON, QS_TILE_ICON);
-    qs_symbol(c, icon, (spec.icon_name, spec.glyph), QS_TILE_ICON, ink);
+    let icon = qs_tile_icon(rect);
+    if spec.pending {
+        c.stroke(icon, 2.0, R_ROUND, theme.track);
+    } else {
+        qs_symbol(c, icon, (spec.icon_name, spec.glyph), QS_TILE_ICON, ink);
+    }
     let text_right = if spec.tile.more().is_some() {
         let (_, side) = qs_split(rect);
         let line = local_rect(side.loc.x, rect.loc.y + QS_HAIRLINE_INSET, 1, rect.size.h - QS_HAIRLINE_INSET * 2);
@@ -4605,7 +4631,14 @@ fn draw_qs_tiles(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, draw: &QsDraw<'_
             }
         };
         let level = draw.motion.tile(tile);
-        draw_qs_tile(c, ctx, &QsTileSpec { tile, rect, level, title, subtitle: &subtitle, icon_name, glyph });
+        let pending = match tile {
+            QsTile::Network => draw.panel.radio_pending(panels::Radio::Wifi),
+            QsTile::Bluetooth => draw.panel.radio_pending(panels::Radio::Bluetooth),
+            _ => false,
+        };
+        let subtitle = if pending { t(Key::QsStarting).to_string() } else { subtitle };
+        let spec = QsTileSpec { tile, rect, level, title, subtitle: &subtitle, icon_name, glyph, pending };
+        draw_qs_tile(c, ctx, &spec);
     }
 }
 

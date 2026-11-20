@@ -2102,18 +2102,19 @@ impl GlideState {
             TopbarAction::QsToggleWifi => {
                 let was_on = self.topbar.system_status().wifi_enabled;
                 crate::system_info::set_wifi(!was_on);
-                let label = if was_on { crate::i18n::Key::Off } else { crate::i18n::Key::Connecting };
                 self.update_system_status(|status| {
                     status.wifi_enabled = !was_on;
                     status.wifi_level = 0;
-                    status.wifi_ssid = crate::i18n::t(label).to_string();
+                    status.wifi_ssid.clear();
                 });
+                self.topbar.radio_switched(crate::topbar::Radio::Wifi, !was_on);
             }
             TopbarAction::QsToggleNetworking => self.toggle_networking(),
             TopbarAction::QsToggleBluetooth => {
                 let was_on = self.topbar.system_status().bluetooth_on;
                 crate::system_info::set_bluetooth(!was_on);
                 self.update_system_status(|status| status.bluetooth_on = !was_on);
+                self.topbar.radio_switched(crate::topbar::Radio::Bluetooth, !was_on);
             }
             TopbarAction::QsToggleVpn => self.toggle_vpn_tile(),
             TopbarAction::QsToggleNightLight => {

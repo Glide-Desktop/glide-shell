@@ -381,6 +381,11 @@ glide_app::catalogue! {
     QsVpnSection => "Connections", "З\u{2019}єднання";
     QsForgetNetwork => "Forget Network", "Забути мережу";
     QsUntil => "Until {}", "До {}";
+    QsStarting => "Turning on\u{2026}", "Вмикається\u{2026}";
+    QsWifiStarting => "Wi-Fi is turning on", "Wi-Fi вмикається";
+    QsWifiStartingText => "Networks will show up in a second.", "Мережі з\u{2019}являться за секунду.";
+    QsBluetoothStarting => "Bluetooth is turning on", "Bluetooth вмикається";
+    QsBluetoothStartingText => "Devices connected before will join on their own.", "Під\u{2019}єднані раніше пристрої підхопляться самі.";
     QsScanning => "Searching for networks\u{2026}", "Пошук мереж\u{2026}";
     QsScannedNow => "updated just now", "оновлено щойно";
     QsScannedAgo => "updated {n} s ago", "оновлено {n} с тому";

@@ -337,6 +337,14 @@ enum RowStatus {
     Failed(ConnectError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Radio {
+    Wifi,
+    Bluetooth,
+}
+
+const RADIO_PENDING: std::time::Duration = std::time::Duration::from_secs(8);
+
 #[derive(Debug, Default)]
 struct Accordion {
     open: Option<(ItemKind, i32, i32)>,
@@ -418,6 +426,7 @@ pub(super) struct DetailPanel {
     origin: Option<LocalRect>,
     pub(super) headset_batteries: Vec<(String, u8)>,
     accordion: Accordion,
+    pub(super) radio_pending: Option<(Radio, std::time::Instant)>,
     sound_scroll: usize,
     list_scroll: usize,
     pending: Option<Pending>,
@@ -462,6 +471,11 @@ impl DetailPanel {
 
     fn spinning(&self) -> bool {
         self.view.is_some() && (self.scan.running || self.pending.is_some() || self.netbird.row().1)
+            || self.radio_pending.is_some()
+    }
+
+    pub(super) fn radio_pending(&self, radio: Radio) -> bool {
+        self.radio_pending.is_some_and(|(pending, _)| pending == radio)
     }
 
     pub(super) fn reset(&mut self) {
@@ -520,6 +534,7 @@ enum EmptyIcon {
     Wifi,
     Bluetooth,
     Vpn,
+    Pending,
 }
 
 impl EmptyIcon {
@@ -529,7 +544,7 @@ impl EmptyIcon {
             Self::WifiOff => ("network-wireless-offline", crate::paint::draw_wifi_waves_glyph_over),
             Self::Wifi => ("network-wireless", crate::paint::draw_wifi_waves_glyph_over),
             Self::Bluetooth => ("bluetooth-disabled", crate::paint::draw_bluetooth_glyph_over),
-            Self::Vpn => ("network-vpn", crate::paint::draw_lock_glyph_over),
+            Self::Vpn | Self::Pending => ("network-vpn", crate::paint::draw_lock_glyph_over),
         }
     }
 }
@@ -557,6 +572,19 @@ impl Empty {
 
     const fn note(icon: EmptyIcon, title: Key) -> Self {
         Self { icon, title, text: None }
+    }
+
+    const fn starting(radio: Radio) -> Self {
+        match radio {
+            Radio::Wifi => {
+                Self { icon: EmptyIcon::Pending, title: Key::QsWifiStarting, text: Some(Key::QsWifiStartingText) }
+            }
+            Radio::Bluetooth => Self {
+                icon: EmptyIcon::Pending,
+                title: Key::QsBluetoothStarting,
+                text: Some(Key::QsBluetoothStartingText),
+            },
+        }
     }
 }
 
@@ -807,6 +835,9 @@ fn wifi_list(
     column: &mut Column<'_>, panel: &DetailPanel, status: &crate::system_info::SystemStatus,
     painter: Option<&crate::paint::Painter>,
 ) {
+    if panel.radio_pending(Radio::Wifi) {
+        return column.empty(Empty::starting(Radio::Wifi), painter);
+    }
     if !status.wifi_enabled || status.airplane {
         return column.empty(Empty::wifi_off(status.airplane), painter);
     }
@@ -840,6 +871,9 @@ fn bluetooth_items(
     column: &mut Column<'_>, panel: &DetailPanel, status: &crate::system_info::SystemStatus,
     painter: Option<&crate::paint::Painter>,
 ) {
+    if panel.radio_pending(Radio::Bluetooth) {
+        return column.empty(Empty::starting(Radio::Bluetooth), painter);
+    }
     if !status.bluetooth_on {
         return column.empty(Empty::bluetooth_off(status.airplane), painter);
     }
@@ -1192,7 +1226,33 @@ impl Topbar {
         self.touch();
     }
 
+    pub fn radio_switched(&mut self, radio: Radio, on: bool) {
+        if on {
+            self.qs_panel.radio_pending = Some((radio, glide_ui::clock::now()));
+        } else if self.qs_panel.radio_pending(radio) {
+            self.qs_panel.radio_pending = None;
+        }
+        self.qs_panel.bump();
+        self.status_rev = self.status_rev.wrapping_add(1);
+        self.touch();
+    }
+
+    fn settle_radio(&mut self, radio: Radio) {
+        if self.qs_panel.radio_pending(radio) {
+            self.qs_panel.radio_pending = None;
+            self.status_rev = self.status_rev.wrapping_add(1);
+        }
+    }
+
     pub fn tick_scan_age(&mut self, now: std::time::Instant) -> bool {
+        if let Some((radio, since)) = self.qs_panel.radio_pending
+            && now.saturating_duration_since(since) >= RADIO_PENDING
+        {
+            self.settle_radio(radio);
+            self.qs_panel.bump();
+            self.touch();
+            return true;
+        }
         let panel = &mut self.qs_panel;
         if panel.view != Some(Detail::Wifi) || panel.scan.running {
             return false;
@@ -1338,14 +1398,22 @@ impl Topbar {
                 self.qs_panel.wifi_info = info;
             }
             NetEvent::Wifi(networks) => {
-                if self.qs_panel.wifi_ready && self.qs_panel.wifi == networks {
+                let settled = !networks.is_empty() && self.qs_panel.radio_pending(Radio::Wifi);
+                if settled {
+                    self.settle_radio(Radio::Wifi);
+                }
+                if !settled && self.qs_panel.wifi_ready && self.qs_panel.wifi == networks {
                     return false;
                 }
                 self.qs_panel.wifi = networks;
                 self.qs_panel.wifi_ready = true;
             }
             NetEvent::Bluetooth(devices) => {
-                if self.qs_panel.devices_ready && self.qs_panel.devices == devices {
+                let settled = !devices.is_empty() && self.qs_panel.radio_pending(Radio::Bluetooth);
+                if settled {
+                    self.settle_radio(Radio::Bluetooth);
+                }
+                if !settled && self.qs_panel.devices_ready && self.qs_panel.devices == devices {
                     return false;
                 }
                 self.qs_panel.devices = devices;
@@ -1566,6 +1634,25 @@ fn push_shaking_field<R>(
     let dx = shake_offset(progress);
     let element = Rectangle::new(rect.loc + area.loc + smithay::utils::Point::from((dx, 0)), area.size);
     super::push_placed(renderer, &buffer, Placed { popup: rect, element, progress: 1.0, alpha: 1.0 }, scale, elements);
+}
+
+pub(super) fn push_spinner<R>(
+    topbar: &mut Topbar, renderer: &mut R, (popup, at, reveal): (Rectangle<i32, Logical>, LocalRect, f64),
+    (scale, output_scale): (Scale<f64>, i32), elements: &mut Vec<MemoryRenderBufferRenderElement<R>>,
+) where
+    R: crate::raster::ShellRenderer,
+{
+    let colour = topbar.theme.active_background;
+    let step = u8::try_from(now_ms() % SPIN_PERIOD_MS * u128::from(SPIN_STEPS) / SPIN_PERIOD_MS).unwrap_or(0);
+    let side = at.size.w;
+    let Some(buffer) = topbar
+        .qs_spin_cache
+        .resolve((step, side, side), output_scale, || draw_spinner_arc(side, step, colour, output_scale))
+    else {
+        return;
+    };
+    let element = Rectangle::new(popup.loc + at.loc, at.size);
+    super::push_placed(renderer, buffer, Placed { popup, element, progress: reveal, alpha: 1.0 }, scale, elements);
 }
 
 fn push_marks<R>(
@@ -1931,7 +2018,13 @@ fn draw_detail_header(
     let title_band = (geometry.title_left, geometry.title_right, top, bottom);
     c.text(ctx.painter, title_band, TextAlign::Left, title, theme.label, &super::QS_TITLE_PAGE);
     if has_radio(detail) {
-        draw_page_switch(c, theme, geometry.toggle, radio_on(detail, panel, status));
+        let pending = match detail {
+            Detail::Wifi => panel.radio_pending(Radio::Wifi),
+            Detail::Bluetooth => panel.radio_pending(Radio::Bluetooth),
+            _ => false,
+        };
+        let state = if pending { SwitchState::Pending } else { switch_state(radio_on(detail, panel, status)) };
+        draw_page_switch(c, theme, geometry.toggle, state);
     }
 }
 
@@ -2032,10 +2125,16 @@ pub(super) struct Marks {
 
 pub(super) fn motion_marks(panel: &DetailPanel, items: &[DetailItem], painter: &crate::paint::Painter) -> Marks {
     let mut marks = Marks { spinners: Vec::new(), sweep: None };
-    for item in items
-        .iter()
-        .filter(|item| item.slot.is_some() || matches!(item.kind, ItemKind::WifiSection | ItemKind::VpnNetbird))
-    {
+    for item in items {
+        if let ItemKind::Empty(empty) = item.kind
+            && empty.icon == EmptyIcon::Pending
+        {
+            marks.spinners.push(empty_spinner(empty_well(item.rect)));
+            continue;
+        }
+        if item.slot.is_none() && !matches!(item.kind, ItemKind::WifiSection | ItemKind::VpnNetbird) {
+            continue;
+        }
         let busy_row = match item.kind {
             ItemKind::Network(index) => panel.wifi.get(index).is_some_and(|n| busy(panel.status_for(&n.ssid))),
             ItemKind::Device(index) => panel.devices.get(index).is_some_and(|d| busy(panel.status_for(&d.mac))),
@@ -2098,7 +2197,7 @@ fn draw_row(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, spec
         Tail::Switch(on) => {
             let switch =
                 local_rect(right - DETAIL_SWITCH_W, centre_y - DETAIL_SWITCH_H / 2, DETAIL_SWITCH_W, DETAIL_SWITCH_H);
-            draw_page_switch(c, theme, switch, on);
+            draw_page_switch(c, theme, switch, switch_state(on));
             right = switch.loc.x - ROW_GAP;
         }
     }
@@ -2117,15 +2216,28 @@ fn draw_row(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, spec
     c.text(ctx.painter, band, TextAlign::Left, &spec.subtitle.0, sub_ink, &super::QS_NOTE);
 }
 
-fn draw_page_switch(c: &mut Canvas<'_>, theme: &TopbarTheme, rect: LocalRect, on: bool) {
-    c.fill(rect, if on { theme.active_background } else { theme.track }, R_ROUND);
-    let x = if on {
-        rect.loc.x + rect.size.w - DETAIL_SWITCH_INSET - DETAIL_SWITCH_THUMB
-    } else {
-        rect.loc.x + DETAIL_SWITCH_INSET
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwitchState {
+    Off,
+    Pending,
+    On,
+}
+
+fn draw_page_switch(c: &mut Canvas<'_>, theme: &TopbarTheme, rect: LocalRect, state: SwitchState) {
+    let (track, knob_colour, travel) = match state {
+        SwitchState::Off => (theme.track, theme.thumb, 0),
+        SwitchState::Pending => (theme.warn, super::QS_THUMB_FACE, 1),
+        SwitchState::On => (theme.active_background, super::QS_THUMB_FACE, 2),
     };
+    c.fill(rect, track, R_ROUND);
+    let room = rect.size.w - DETAIL_SWITCH_INSET * 2 - DETAIL_SWITCH_THUMB;
+    let x = rect.loc.x + DETAIL_SWITCH_INSET + room * travel / 2;
     let knob = local_rect(x, rect.loc.y + DETAIL_SWITCH_INSET, DETAIL_SWITCH_THUMB, DETAIL_SWITCH_THUMB);
-    c.fill(knob, if on { super::QS_THUMB_FACE } else { theme.thumb }, R_ROUND);
+    c.fill(knob, knob_colour, R_ROUND);
+}
+
+const fn switch_state(on: bool) -> SwitchState {
+    if on { SwitchState::On } else { SwitchState::Off }
 }
 
 fn subtitle_with(status: (&TopbarTheme, RowStatus), fallback: String) -> (String, Option<Color>) {
@@ -2362,13 +2474,32 @@ fn draw_airplane_row(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalR
     draw_row(c, ctx, rect, &spec);
 }
 
+const BIG_SPINNER: i32 = 20;
+
+fn empty_spinner(well: LocalRect) -> LocalRect {
+    local_rect(
+        well.loc.x + (well.size.w - BIG_SPINNER) / 2,
+        well.loc.y + (well.size.h - BIG_SPINNER) / 2,
+        BIG_SPINNER,
+        BIG_SPINNER,
+    )
+}
+
+fn empty_well(rect: LocalRect) -> LocalRect {
+    local_rect(rect.loc.x + rect.size.w / 2 - EMPTY_WELL / 2, rect.loc.y + EMPTY_PAD_TOP, EMPTY_WELL, EMPTY_WELL)
+}
+
 fn draw_empty(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, empty: Empty) {
     let theme = ctx.theme;
     let centre = rect.loc.x + rect.size.w / 2;
     let mut y = rect.loc.y + EMPTY_PAD_TOP;
     let well = local_rect(centre - EMPTY_WELL / 2, y, EMPTY_WELL, EMPTY_WELL);
     c.fill(well, theme.fill_2, R3);
-    super::qs_symbol(c, well, empty.icon.symbol(), super::QS_ICON, theme.muted);
+    if empty.icon == EmptyIcon::Pending {
+        draw_spinner(c, theme, empty_spinner(well));
+    } else {
+        super::qs_symbol(c, well, empty.icon.symbol(), super::QS_ICON, theme.muted);
+    }
     y += EMPTY_WELL + SP2 + SP1;
     let title_h = super::QS_TITLE.line_height_px as i32;
     let (left, right) = (rect.loc.x + SP3, rect.loc.x + rect.size.w - SP3);
@@ -2997,6 +3128,26 @@ mod tests {
         let closing = accordion_bands(&accordion, 400);
         assert_eq!(closing[1].0, 150);
         assert!(closing[1].1 > 150, "the rows below begin low and rise into the gap");
+    }
+
+    #[test]
+    fn a_radio_turning_on_waits_with_a_spinner_until_its_list_arrives() {
+        let mut bar = open_wifi();
+        bar.radio_switched(Radio::Wifi, true);
+        assert!(bar.qs_panel.radio_pending(Radio::Wifi) && bar.qs_panel.is_animating());
+        let body = detail_geometry(super::super::QS_PAGE_MAX, true, true).body;
+        let painter = crate::paint::Painter::new(14.0, None);
+        let items = detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), body, Some(&painter));
+        assert!(items.iter().any(|item| item.kind == ItemKind::Empty(Empty::starting(Radio::Wifi))));
+        assert_eq!(motion_marks(&bar.qs_panel, &items, &painter).spinners.len(), 1, "the empty state's spinner turns");
+        assert!(!bar.apply_net_event(NetEvent::Wifi(Vec::new())) || bar.qs_panel.radio_pending(Radio::Wifi));
+        assert!(bar.qs_panel.radio_pending(Radio::Wifi), "an empty list does not end the wait");
+        assert!(bar.apply_net_event(NetEvent::Wifi(vec![network("Home", true, true)])));
+        assert!(!bar.qs_panel.radio_pending(Radio::Wifi));
+        bar.radio_switched(Radio::Bluetooth, true);
+        let later = bar.qs_panel.radio_pending.map(|(_, at)| at).expect("pending") + RADIO_PENDING;
+        assert!(bar.tick_scan_age(later), "it gives up after a while");
+        assert!(bar.qs_panel.radio_pending.is_none());
     }
 
     #[test]
