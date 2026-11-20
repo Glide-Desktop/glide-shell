@@ -613,6 +613,7 @@ pub(super) enum ItemKind {
     VpnNetbird,
     Vpn(usize),
     MicSlider,
+    Meter,
     Network(usize),
     Info(usize),
     Device(usize),
@@ -894,7 +895,7 @@ fn bluetooth_items(
     }
 }
 
-fn sound_items(column: &mut Column<'_>, panel: &DetailPanel, mic: bool) {
+fn sound_items(column: &mut Column<'_>, panel: &DetailPanel, (mic, live): (bool, bool)) {
     let count = panel.outputs.len() + panel.inputs.as_ref().map_or(0, Vec::len);
     let mut skipped = panel.sound_scroll.min(count.saturating_sub(1));
     let groups = [
@@ -933,6 +934,16 @@ fn sound_items(column: &mut Column<'_>, panel: &DetailPanel, mic: bool) {
         if column.push(ItemKind::MicSlider, super::QS_ROW, None) {
             column.items.push(DetailItem { kind: ItemKind::MicSlider, rect: row.icon, slot: Some(Slot::QsMicMute) });
             column.items.push(DetailItem { kind: ItemKind::MicSlider, rect: row.track, slot: Some(Slot::QsMicTrack) });
+            if live {
+                let meter = local_rect(
+                    column.left + super::QS_METER_INSET,
+                    column.y + super::QS_ROW_GAP - super::QS_METER_GAP,
+                    column.width - super::QS_METER_INSET * 2,
+                    super::QS_METER_H,
+                );
+                column.items.push(DetailItem { kind: ItemKind::Meter, rect: meter, slot: None });
+                column.y += super::QS_METER_H;
+            }
         }
     }
 }
@@ -1003,7 +1014,10 @@ pub(super) fn detail_items(
     match detail {
         Detail::Wifi => wifi_items(&mut column, panel, status, painter),
         Detail::Bluetooth => bluetooth_items(&mut column, panel, status, painter),
-        Detail::Sound => sound_items(&mut column, panel, status.mic_available),
+        Detail::Sound => {
+            let live = !status.privacy.microphone.is_empty() && !status.mic_muted;
+            sound_items(&mut column, panel, (status.mic_available, live));
+        }
         Detail::Battery => battery_items(&mut column, status),
         Detail::Vpn => vpn_items(&mut column, panel, painter),
         Detail::Power => power_items(&mut column, panel, painter),
@@ -1560,6 +1574,11 @@ pub(super) fn push_detail<R>(
         .find(|item| matches!(item.kind, ItemKind::Prompt(_) | ItemKind::Info(_) | ItemKind::PowerConfirm(_)))
         .map(|item| (item.kind, item.rect.loc.y, item.rect.size.h));
     topbar.qs_panel.accordion.follow(open);
+    if let Some(meter) =
+        items.iter().find(|item| item.kind == ItemKind::Meter).filter(|item| clip.contains(item.rect.loc))
+    {
+        super::push_mic_meter(topbar, renderer, (rect, meter.rect, 0, reveal), (scale, output_scale), elements);
+    }
     if topbar.qs_panel.spinning() {
         let marks = motion_marks(&topbar.qs_panel, &items, painter);
         push_marks(topbar, renderer, (rect, clip, reveal), &marks, (scale, output_scale), elements);
@@ -1828,6 +1847,7 @@ fn draw_item(
         ItemKind::BatteryHero => draw_battery_hero(c, ctx, rect, status),
         ItemKind::Segments => draw_segments(c, ctx, rect, (status.power_profile, profile)),
         ItemKind::Segment(_) | ItemKind::MicSlider | ItemKind::WifiSection => {}
+        ItemKind::Meter => c.fill(rect, ctx.theme.fill_2, R_ROUND),
         ItemKind::SegmentsHint => {
             if let Some(active) = status.power_profile {
                 let lines = crate::notifications::wrap_lines(
@@ -2158,7 +2178,7 @@ pub(super) fn motion_marks(panel: &DetailPanel, items: &[DetailItem], painter: &
     marks
 }
 
-fn now_ms() -> u128 {
+pub(super) fn now_ms() -> u128 {
     glide_ui::clock::now().saturating_duration_since(*SPIN_EPOCH).as_millis()
 }
 

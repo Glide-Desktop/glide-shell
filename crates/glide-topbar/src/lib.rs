@@ -143,6 +143,11 @@ const QS_CHIP_PAD: i32 = 10;
 const QS_CONFIRM_PILL: i32 = 28;
 const QS_CONFIRM_PILL_PAD: i32 = 11;
 const QS_PAGE_MAX: i32 = 640;
+const QS_METER_INSET: i32 = 50;
+const QS_METER_GAP: i32 = 4;
+const QS_METER_H: i32 = 3;
+const QS_METER_PERIOD_MS: u128 = 1400;
+const QS_METER_LEVELS: [(f64, f64); 5] = [(0.0, 0.12), (0.3, 0.46), (0.55, 0.22), (0.8, 0.64), (1.0, 0.30)];
 
 const POPUP_GAP: i32 = glide_theme::spacing::SP2;
 const SHADOW_CACHE_LIMIT: usize = 48;
@@ -1252,7 +1257,7 @@ impl Topbar {
         let controls = controls
             || self.tile_anims.values().any(Anim::is_animating)
             || self.menu_births.values().any(Anim::is_animating);
-        let detail = self.qs_panel.is_animating();
+        let detail = self.qs_panel.is_animating() || self.qs_meter_running();
         let extras = self.calendar.is_animating() || self.indicators.is_animating() || self.island.is_animating();
         let tray = self.tray_is_animating() || self.face_tip.is_animating();
         let sliding = self.slides.values().any(|slide| slide.is_animating(motion::t3()));
@@ -1407,6 +1412,12 @@ impl Topbar {
             QsTile::Caffeine => self.caffeinated,
             QsTile::DarkTheme => self.theme.dark,
         }
+    }
+
+    fn qs_meter_running(&self) -> bool {
+        let shape = self.qs_shape(None);
+        let page = matches!(self.qs_panel.view, None | Some(Detail::Sound));
+        self.open_popup == Some(OpenPopup::QuickSettings) && page && shape.mic && shape.mic_live
     }
 
     fn tile_pending(&self, tile: QsTile) -> bool {
@@ -1798,6 +1809,7 @@ impl Topbar {
             bluetooth: status.bluetooth_available,
             network: status.wifi_available || status.ethernet_available,
             strip: qs_privacy(status).is_some(),
+            mic_live: !status.privacy.microphone.is_empty() && !status.mic_muted,
             chip,
         }
     }
@@ -2549,6 +2561,7 @@ struct QsShape {
     bluetooth: bool,
     network: bool,
     strip: bool,
+    mic_live: bool,
     chip: i32,
 }
 
@@ -2574,6 +2587,7 @@ struct QsGeometry {
     strip: Option<LocalRect>,
     volume: QsSliderRow,
     mic: Option<QsSliderRow>,
+    meter: Option<LocalRect>,
     brightness: Option<QsSliderRow>,
     dividers: [i32; 2],
     tiles: Vec<(QsTile, LocalRect)>,
@@ -2626,6 +2640,18 @@ fn qs_geometry(shape: &QsShape) -> QsGeometry {
         row
     };
     let mic = shape.mic.then(|| next_row(true));
+    let meter = (shape.mic && shape.mic_live).then(|| {
+        let meter =
+            local_rect(x + QS_METER_INSET, y + QS_ROW_GAP - QS_METER_GAP, row_w - QS_METER_INSET * 2, QS_METER_H);
+        y += QS_METER_H;
+        meter
+    });
+    let mut next_row = |drill: bool| {
+        y += QS_ROW_GAP;
+        let row = qs_slider_row(x, y, row_w, drill);
+        y += QS_ROW;
+        row
+    };
     let brightness = shape.brightness.then(|| next_row(false));
     let first = y + SP2;
     y += QS_DIVIDER;
@@ -2654,7 +2680,17 @@ fn qs_geometry(shape: &QsShape) -> QsGeometry {
         lock: button(2),
         power: button(1),
     };
-    QsGeometry { strip, volume, mic, brightness, dividers: [first, second], tiles, footer, height: y + QS_ROW + QS_PAD }
+    QsGeometry {
+        strip,
+        volume,
+        mic,
+        meter,
+        brightness,
+        dividers: [first, second],
+        tiles,
+        footer,
+        height: y + QS_ROW + QS_PAD,
+    }
 }
 
 fn offset_rect(rect: LocalRect, origin: Point<i32, Logical>) -> LocalRect {
@@ -4027,6 +4063,42 @@ fn draw_qs_background((w, h): (i32, i32), theme: &TopbarTheme, scale: i32) -> Op
 
 const QS_PAGE_AWAY: f64 = 24.0;
 
+fn mic_meter_level(ms: u128) -> f64 {
+    let cycle = (ms % (QS_METER_PERIOD_MS * 2)) as f64 / QS_METER_PERIOD_MS as f64;
+    let phase = E_IO.ease_f64(if cycle < 1.0 { cycle } else { 2.0 - cycle });
+    QS_METER_LEVELS.windows(2).find(|pair| phase <= pair[1].0).map_or(QS_METER_LEVELS[4].1, |pair| {
+        let span = (phase - pair[0].0) / (pair[1].0 - pair[0].0);
+        pair[0].1 + (pair[1].1 - pair[0].1) * span
+    })
+}
+
+fn push_mic_meter<R: ShellRenderer>(
+    topbar: &mut Topbar, renderer: &mut R,
+    (rect, meter, shift, reveal): (Rectangle<i32, Logical>, LocalRect, i32, f64),
+    (scale, output_scale): (Scale<f64>, i32), elements: &mut Vec<MemoryRenderBufferRenderElement<R>>,
+) {
+    let colour = topbar.theme.ok;
+    let width = (f64::from(meter.size.w) * mic_meter_level(panels::now_ms())).round() as i32;
+    if width <= 0 {
+        return;
+    }
+    let key = (u8::MAX - 1, meter.size.w, meter.size.h);
+    let Some(buffer) = topbar.qs_spin_cache.resolve(key, output_scale, || {
+        let mut c = Canvas::new(meter.size.w, meter.size.h, output_scale)?;
+        let full = c.full();
+        c.fill(full, colour, R_ROUND);
+        Some(c.finish())
+    }) else {
+        return;
+    };
+    let element = Rectangle::new(
+        Point::from((rect.loc.x + meter.loc.x - shift, rect.loc.y + meter.loc.y)),
+        Size::from((width, meter.size.h)),
+    );
+    let placed = Placed { popup: rect, element, progress: reveal, alpha: 1.0 };
+    push_placed_from(renderer, buffer, placed, Some(Point::from((0, 0))), scale, elements);
+}
+
 fn qs_main_motion(slide: f64) -> (i32, f32) {
     ((slide * QS_PAGE_AWAY).round() as i32, if slide >= 1.0 { 0.0 } else { 1.0 })
 }
@@ -4041,6 +4113,11 @@ fn push_qs_main<R: ShellRenderer>(
     let (shift, alpha) = qs_main_motion(slide);
     let left = rect.loc.x - shift;
     let geometry = qs_geometry(&shape);
+    if alpha > 0.0
+        && let Some(meter) = geometry.meter
+    {
+        push_mic_meter(topbar, renderer, (rect, meter, shift, reveal), (scale, output_scale), elements);
+    }
     if alpha > 0.0 {
         for &(tile, tile_rect) in &geometry.tiles {
             if topbar.tile_pending(tile) {
@@ -4798,6 +4875,9 @@ fn draw_quick_settings(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, draw: &QsD
         draw_qs_strip(c, ctx, strip, draw.status);
     }
     draw_qs_sliders(c, ctx, draw);
+    if let Some(meter) = geometry.meter {
+        c.fill(meter, ctx.theme.fill_2, R_ROUND);
+    }
     for y in geometry.dividers {
         c.fill(local_rect(QS_PAD, y, QS_WIDTH - QS_PAD * 2, 1), ctx.theme.line, 0.0);
     }
@@ -5711,8 +5791,14 @@ mod tests {
             bluetooth: true,
             network: true,
             strip: true,
+            mic_live: true,
             chip: QS_CHIP_DEFAULT,
         };
+        let meter = qs_geometry(&full).meter.expect("a live microphone shows its meter");
+        let mic = qs_geometry(&full).mic.expect("mic row");
+        assert!(meter.loc.y >= mic.icon.loc.y + mic.icon.size.h - QS_METER_GAP && meter.size.h == QS_METER_H);
+        assert!(qs_geometry(&QsShape { mic_live: false, ..full }).meter.is_none());
+        assert!((0..2800).step_by(50).all(|ms| (0.1..=0.7).contains(&mic_meter_level(ms))));
         for shape in [plain, full] {
             let geometry = qs_geometry(&shape);
             let footer = geometry.footer;
