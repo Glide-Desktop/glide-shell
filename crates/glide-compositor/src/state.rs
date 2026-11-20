@@ -1671,6 +1671,7 @@ impl GlideState {
 
         let mut dirty = now.is_some_and(|now| self.topbar.set_now(now));
         dirty |= self.topbar.tick_island(std::time::Instant::now());
+        dirty |= self.topbar.tick_scan_age(glide_ui::clock::now());
         dirty |= self.sync_screen_capture();
         dirty |= self.topbar.set_app(app_id, app_name);
         dirty |= self.topbar.set_dnd(self.notifications.dnd());

@@ -7,7 +7,7 @@ use crate::power::PowerAction;
 use crate::state::GlideState;
 use crate::topbar::{Detail, PanelAction, PromptOutcome, RowTarget};
 
-pub const RESCAN_INTERVAL: Duration = Duration::from_secs(10);
+pub const RESCAN_INTERVAL: Duration = Duration::from_secs(8);
 const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
 const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 const BLUETOOTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -299,6 +299,7 @@ pub fn sort_outputs(outputs: &mut [AudioOutput]) {
 
 pub enum NetRequest {
     ScanWifi,
+    RescanWifi,
     ScanBluetooth,
     ScanOutputs,
     ScanInputs,
@@ -316,6 +317,7 @@ impl std::fmt::Debug for NetRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ScanWifi => f.write_str("ScanWifi"),
+            Self::RescanWifi => f.write_str("RescanWifi"),
             Self::ScanBluetooth => f.write_str("ScanBluetooth"),
             Self::ScanOutputs => f.write_str("ScanOutputs"),
             Self::ScanInputs => f.write_str("ScanInputs"),
@@ -367,7 +369,7 @@ pub fn request(request: NetRequest) {
         return;
     }
     let flag = match request {
-        NetRequest::ScanWifi => Some(&WIFI_SCANNING),
+        NetRequest::ScanWifi | NetRequest::RescanWifi => Some(&WIFI_SCANNING),
         NetRequest::ScanBluetooth => Some(&BLUETOOTH_SCANNING),
         NetRequest::ScanOutputs => Some(&OUTPUTS_SCANNING),
         NetRequest::ScanInputs => Some(&INPUTS_SCANNING),
@@ -408,13 +410,19 @@ pub fn request(request: NetRequest) {
 }
 
 fn emit_wifi() {
-    emit(NetEvent::Wifi(scan_wifi()));
+    emit(NetEvent::Wifi(scan_wifi("auto")));
     emit(NetEvent::WifiInfo(connected_wifi_info()));
 }
 
 fn run_request(request: NetRequest) {
     match request {
         NetRequest::ScanWifi => emit_wifi(),
+        NetRequest::RescanWifi => {
+            emit(NetEvent::WifiScanning(true));
+            emit(NetEvent::Wifi(scan_wifi("yes")));
+            emit(NetEvent::WifiInfo(connected_wifi_info()));
+            emit(NetEvent::WifiScanning(false));
+        }
         NetRequest::ForgetWifi { ssid } => {
             let result = forget_wifi(&ssid);
             emit(NetEvent::WifiResult { ssid, result });
@@ -519,10 +527,10 @@ fn stdout_of(program: &str, args: &[&str]) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn scan_wifi() -> Vec<WifiNetwork> {
+fn scan_wifi(rescan: &str) -> Vec<WifiNetwork> {
     let Some(list) = stdout_of(
         "nmcli",
-        &["-t", "-f", "IN-USE,SSID,SECURITY,SIGNAL,BARS", "dev", "wifi", "list", "--rescan", "auto"],
+        &["-t", "-f", "IN-USE,SSID,SECURITY,SIGNAL,BARS", "dev", "wifi", "list", "--rescan", rescan],
     ) else {
         return Vec::new();
     };
@@ -679,7 +687,7 @@ pub const fn use_device(drawer: crate::topbar::Drawer, name: String) -> NetReque
 #[must_use]
 pub const fn scan_for(detail: Detail) -> Option<NetRequest> {
     match detail {
-        Detail::Wifi => Some(NetRequest::ScanWifi),
+        Detail::Wifi => Some(NetRequest::RescanWifi),
         Detail::Bluetooth => Some(NetRequest::ScanBluetooth),
         Detail::Sound => Some(NetRequest::ScanOutputs),
         Detail::Vpn => Some(NetRequest::ScanVpn),
@@ -770,6 +778,7 @@ impl GlideState {
             PanelAction::PromptReveal => {
                 self.topbar.toggle_reveal();
             }
+            PanelAction::Rescan => request(NetRequest::RescanWifi),
             PanelAction::Forget | PanelAction::Disconnect => {
                 if let Some(ssid) = self.topbar.expanded_network().map(str::to_string) {
                     self.topbar.toggle_info(&ssid);
@@ -1104,7 +1113,7 @@ mod tests {
         for detail in [Detail::Battery, Detail::Power] {
             assert!(scan_for(detail).is_none(), "{detail:?}");
         }
-        assert!(matches!(scan_for(Detail::Wifi), Some(NetRequest::ScanWifi)));
+        assert!(matches!(scan_for(Detail::Wifi), Some(NetRequest::RescanWifi)), "the page asks for a real scan");
         assert!(matches!(scan_for(Detail::Vpn), Some(NetRequest::ScanVpn)));
     }
 

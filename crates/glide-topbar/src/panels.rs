@@ -87,6 +87,7 @@ pub enum PanelAction {
     PromptSubmit,
     Forget,
     Disconnect,
+    Rescan,
     Settings,
 }
 
@@ -337,6 +338,13 @@ enum RowStatus {
 }
 
 #[derive(Debug, Default)]
+struct Scan {
+    running: bool,
+    finished: Option<std::time::Instant>,
+    age: Option<u64>,
+}
+
+#[derive(Debug, Default)]
 pub(super) struct DetailPanel {
     pub(super) view: Option<Detail>,
     pub(super) shown: Option<Detail>,
@@ -350,6 +358,7 @@ pub(super) struct DetailPanel {
     inputs: Option<Vec<AudioOutput>>,
     vpn_list: Option<Vec<VpnConnection>>,
     wifi_info: Option<WifiInfo>,
+    scan: Scan,
     expanded: Option<String>,
     sound_scroll: usize,
     list_scroll: usize,
@@ -505,6 +514,7 @@ fn empty_height(painter: Option<&crate::paint::Painter>, empty: Empty, width: i3
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ItemKind {
     Section(Key),
+    WifiSection,
     Message(Key),
     Empty(Empty),
     Ethernet,
@@ -699,6 +709,15 @@ fn push_network(column: &mut Column<'_>, panel: &DetailPanel, index: usize) -> b
 }
 
 const AIRPLANE_BLOCK: i32 = MENU_SEP + DETAIL_CARD;
+const RESCAN: i32 = 24;
+const RESCAN_ICON: i32 = 14;
+const SCAN_SPINNER: i32 = 12;
+const SCAN_BAR: i32 = 2;
+
+fn rescan_rect(section: LocalRect) -> LocalRect {
+    let x = section.loc.x + section.size.w - SP2 - RESCAN;
+    local_rect(x, section.loc.y + (section.size.h - RESCAN) / 2, RESCAN, RESCAN)
+}
 const PAGE_PROBE: i32 = 4096;
 
 fn wifi_items(
@@ -728,8 +747,17 @@ fn wifi_list(
     if !status.wifi_enabled || status.airplane {
         return column.empty(Empty::wifi_off(status.airplane), painter);
     }
-    if !column.section(Key::WiFi) {
+    let at = column.y;
+    if !column.push(ItemKind::WifiSection, DETAIL_SECTION, None) {
         return;
+    }
+    if !panel.scan.running {
+        let rect = local_rect(column.left, at, column.width, DETAIL_SECTION);
+        column.items.push(DetailItem {
+            kind: ItemKind::WifiSection,
+            rect: rescan_rect(rect),
+            slot: Some(Slot::QsRescan),
+        });
     }
     if panel.wifi.is_empty() {
         let title = if panel.wifi_ready { Key::QsNoNetworks } else { Key::QsSearching };
@@ -1092,6 +1120,21 @@ impl Topbar {
         self.touch();
     }
 
+    pub fn tick_scan_age(&mut self, now: std::time::Instant) -> bool {
+        let panel = &mut self.qs_panel;
+        if panel.view != Some(Detail::Wifi) || panel.scan.running {
+            return false;
+        }
+        let age = panel.scan.finished.map(|at| now.saturating_duration_since(at).as_secs());
+        if age == panel.scan.age {
+            return false;
+        }
+        panel.scan.age = age;
+        panel.bump();
+        self.touch();
+        true
+    }
+
     pub fn toggle_info(&mut self, ssid: &str) {
         if self.qs_panel.expanded.as_deref() == Some(ssid) {
             self.qs_panel.expanded = None;
@@ -1206,6 +1249,16 @@ impl Topbar {
                 self.qs_panel.vpn_list = Some(vpns);
             }
             NetEvent::VpnResult { name, result } => self.settle_pending(&name, result),
+            NetEvent::WifiScanning(scanning) => {
+                if self.qs_panel.scan.running == scanning {
+                    return false;
+                }
+                self.qs_panel.scan.running = scanning;
+                if !scanning {
+                    self.qs_panel.scan.finished = Some(glide_ui::clock::now());
+                    self.qs_panel.scan.age = Some(0);
+                }
+            }
             NetEvent::WifiInfo(info) => {
                 if self.qs_panel.wifi_info == info {
                     return false;
@@ -1425,6 +1478,7 @@ fn draw_item(
             let label = local_rect(rect.loc.x + SP2, rect.loc.y, rect.size.w - SP2 * 2, rect.size.h);
             c.text_in(ctx.painter, label, TextAlign::Left, t(key), ctx.theme.faint, &TextStyle::MICRO);
         }
+        ItemKind::WifiSection if item.slot.is_none() => draw_wifi_section(c, ctx, rect, panel),
         ItemKind::Message(key) => {
             c.text_in(ctx.painter, rect, TextAlign::Center, t(key), ctx.theme.faint, &TextStyle::CAP);
         }
@@ -1460,7 +1514,7 @@ fn draw_item(
         ItemKind::MicSlider if item.slot.is_none() => draw_mic_slider(c, ctx, rect, status),
         ItemKind::BatteryHero => draw_battery_hero(c, ctx, rect, status),
         ItemKind::Segments => draw_segments(c, ctx, rect, (status.power_profile, profile)),
-        ItemKind::Segment(_) | ItemKind::MicSlider => {}
+        ItemKind::Segment(_) | ItemKind::MicSlider | ItemKind::WifiSection => {}
         ItemKind::SegmentsHint => {
             if let Some(active) = status.power_profile {
                 let lines = crate::notifications::wrap_lines(
@@ -1860,6 +1914,55 @@ fn draw_audio_row(
     draw_row(c, ctx, rect, &spec);
 }
 
+fn scan_label(panel: &DetailPanel) -> Option<String> {
+    if panel.scan.running {
+        return Some(t(Key::QsScanning).to_string());
+    }
+    match panel.scan.age? {
+        0..3 => Some(t(Key::QsScannedNow).to_string()),
+        age => Some(t(Key::QsScannedAgo).replace("{n}", &age.to_string())),
+    }
+}
+
+fn draw_wifi_section(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, panel: &DetailPanel) {
+    let theme = ctx.theme;
+    let label = local_rect(rect.loc.x + SP2, rect.loc.y, rect.size.w / 2, rect.size.h);
+    c.text_in(ctx.painter, label, TextAlign::Left, t(Key::WiFi), theme.faint, &TextStyle::MICRO);
+    let mut right = rect.loc.x + rect.size.w - SP2;
+    let centre = rect.loc.y + rect.size.h / 2;
+    if panel.scan.running {
+        let bar = local_rect(rect.loc.x + SP2, rect.loc.y + rect.size.h - SCAN_BAR, rect.size.w - SP2 * 2, SCAN_BAR);
+        c.fill(bar, theme.fill_2, R_ROUND);
+        c.fill(local_rect(bar.loc.x, bar.loc.y, bar.size.w * 34 / 100, SCAN_BAR), theme.active_background, R_ROUND);
+    } else {
+        let button = rescan_rect(rect);
+        let icon =
+            local_rect(button.loc.x + (RESCAN - RESCAN_ICON) / 2, centre - RESCAN_ICON / 2, RESCAN_ICON, RESCAN_ICON);
+        if !c.icon("view-refresh", RESCAN_ICON, (icon.loc.x, icon.loc.y), theme.faint) {
+            c.text_in(ctx.painter, icon, TextAlign::Center, "\u{21bb}", theme.faint, &TextStyle::CAP);
+        }
+        right = button.loc.x - SP1;
+    }
+    let Some(text) = scan_label(panel) else {
+        return;
+    };
+    let width = text_w(ctx.painter, &text, &TextStyle::CAP);
+    let left = right - width;
+    c.text(
+        ctx.painter,
+        (left, right, rect.loc.y, rect.loc.y + rect.size.h),
+        TextAlign::Right,
+        &text,
+        theme.muted,
+        &TextStyle::CAP,
+    );
+    if panel.scan.running {
+        let spinner =
+            local_rect(left - SP1 - SP1 / 2 - SCAN_SPINNER, centre - SCAN_SPINNER / 2, SCAN_SPINNER, SCAN_SPINNER);
+        draw_spinner(c, theme, spinner);
+    }
+}
+
 fn draw_mic_slider(
     c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, status: &crate::system_info::SystemStatus,
 ) {
@@ -2219,7 +2322,8 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                ItemKind::Section(Key::WiFi),
+                ItemKind::WifiSection,
+                ItemKind::WifiSection,
                 ItemKind::Network(0),
                 ItemKind::Network(1),
                 ItemKind::Network(2),
@@ -2227,6 +2331,7 @@ mod tests {
                 ItemKind::Airplane,
             ]
         );
+        assert_eq!(items[1].slot, Some(Slot::QsRescan), "the section carries the scan-now button");
         assert!(items.iter().all(|item| geometry.body.contains(item.rect.loc)));
 
         let status = crate::system_info::SystemStatus {
@@ -2299,6 +2404,26 @@ mod tests {
         assert!(bar.qs_escape(), "Esc folds the accordion first");
         assert_eq!(bar.expanded_network(), None);
         assert_eq!(bar.detail(), Some(Detail::Wifi));
+    }
+
+    #[test]
+    fn the_wifi_section_says_when_it_searches_and_how_old_the_list_is() {
+        let mut bar = open_wifi();
+        assert_eq!(scan_label(&bar.qs_panel), None, "nothing said before the first scan");
+        assert!(bar.apply_net_event(NetEvent::WifiScanning(true)));
+        relayout(&mut bar);
+        assert_eq!(scan_label(&bar.qs_panel).as_deref(), Some(t(Key::QsScanning)));
+        assert!(bar.slot_rect(Slot::QsRescan).is_none(), "no scan-now button while it searches");
+        assert!(!bar.tick_scan_age(std::time::Instant::now()), "the age waits for the scan");
+        assert!(bar.apply_net_event(NetEvent::WifiScanning(false)));
+        let start = bar.qs_panel.scan.finished.expect("finished");
+        relayout(&mut bar);
+        assert_eq!(scan_label(&bar.qs_panel).as_deref(), Some(t(Key::QsScannedNow)));
+        let rescan = bar.slot_rect(Slot::QsRescan).expect("scan-now button");
+        assert_eq!(bar.action_at(centre(rescan)), Some(TopbarAction::QsPanel(PanelAction::Rescan)));
+        assert!(bar.tick_scan_age(start + std::time::Duration::from_secs(5)));
+        assert_eq!(scan_label(&bar.qs_panel), Some(t(Key::QsScannedAgo).replace("{n}", "5")));
+        assert!(!bar.tick_scan_age(start + std::time::Duration::from_millis(5400)), "one repaint a second");
     }
 
     #[test]
