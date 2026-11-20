@@ -848,6 +848,7 @@ impl Topbar {
         let keyboard = self.focused.is_some();
         self.qs_panel.slide.retarget(0.0, motion::t2(), E_OUT);
         self.qs_panel.prompt = None;
+        self.qs_panel.armed = None;
         self.qs_panel.bump();
         self.set_focused(keyboard.then_some(more_slot(detail)));
         self.touch();
@@ -1100,7 +1101,7 @@ fn prompt_pills(painter: &crate::paint::Painter) -> (i32, i32) {
     )
 }
 
-type DetailKey = (u64, u64, Option<Slot>, Detail);
+pub(super) type DetailKey = (u64, u64, Option<Slot>, Detail, i32, u8);
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_detail<R>(
@@ -1118,15 +1119,16 @@ pub(super) fn push_detail<R>(
         return;
     }
     let hovered = topbar.hovered_in(Slot::in_quick_settings).filter(|_| topbar.qs_panel.view.is_some());
-    let key: DetailKey = (topbar.qs_panel.rev, topbar.detail_rev, hovered, detail);
+    let profile = super::quantize(topbar.profile_anim.value(), super::MOTION_QUANTUM);
+    let key: DetailKey = (topbar.qs_panel.rev, topbar.detail_rev, hovered, detail, rect.size.h, profile);
     let theme = &topbar.theme;
     let status = &topbar.system_status;
     let panel = &topbar.qs_panel;
     let Some(buffer) = topbar.qs_detail_cache.resolve(key, output_scale, || {
         let ctx = QsRenderContext { painter, theme, hovered };
         let mut canvas = Canvas::new(rect.size.w, rect.size.h, output_scale)?.with_icons(Some(icons));
-        let profile = status.power_profile.map_or(1.0, super::profile_index);
-        draw_detail(&mut canvas, &ctx, panel, detail, status, profile);
+        let position = f64::from(profile) / super::MOTION_QUANTUM;
+        draw_detail(&mut canvas, &ctx, panel, detail, status, position);
         Some(canvas.finish())
     }) else {
         return;

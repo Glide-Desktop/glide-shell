@@ -876,7 +876,7 @@ pub struct Topbar {
     qs_cache: Cache<QsCacheKey>,
     qs_bg_cache: Cache<(i32, i32)>,
     qs_sliders: HashMap<SliderKey, MemoryRenderBuffer>,
-    qs_detail_cache: Cache<(u64, u64, Option<Slot>, Detail)>,
+    qs_detail_cache: Cache<panels::DetailKey>,
     headset_cache: Cache<headset_view::HeadsetKey>,
     phone_cache: Cache<phone_view::PhoneKey>,
     passwords: passwords_view::Applet,
@@ -4447,9 +4447,7 @@ fn draw_qs_tiles(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, draw: &QsDraw<'_
                 (t(Key::DoNotDisturb), subtitle, "notifications-disabled", moon)
             }
             QsTile::NightLight => (t(Key::NightLight), on_off(status.night_light_on), "night-light", moon),
-            QsTile::DarkTheme => {
-                (t(Key::QsDarkTheme), on_off(flags.dark), "display-brightness", crate::paint::draw_sun_glyph_over)
-            }
+            QsTile::DarkTheme => (t(Key::QsDarkTheme), on_off(flags.dark), "dark-mode", moon),
             QsTile::Caffeine => {
                 let icon = if flags.caffeinated { "caffeine-cup-full" } else { "caffeine-cup-empty" };
                 let subtitle = if flags.caffeinated { t(Key::QsAwakeSub).to_string() } else { off() };
@@ -6319,6 +6317,23 @@ mod tests {
         bar.close_popup();
         bar.toggle_popup(OpenPopup::QuickSettings);
         assert_eq!(bar.armed_power(), None);
+
+        let main = bar.popup_rect().expect("popup").size.h;
+        bar.open_detail(Detail::Wifi);
+        bar.layout_slots(&painter(), output());
+        let popup = bar.popup_rect().expect("popup");
+        assert_eq!(popup.size.h, qs_page_height(main), "the page is laid out for the popup it is drawn in");
+        let link = bar.slot_rect(Slot::QsDetailSettings).expect("settings link");
+        assert_eq!(link.loc.y + link.size.h, popup.loc.y + popup.size.h - QS_PAD);
+        bar.close_detail();
+
+        bar.open_detail(Detail::Power);
+        bar.arm_power(PowerAction::Restart, vec!["Firefox".into()]);
+        assert!(bar.close_detail());
+        assert_eq!(bar.armed_power(), None, "Back folds the confirmation too");
+        bar.open_detail(Detail::Power);
+        bar.layout_slots(&painter(), output());
+        assert!(bar.slot_rect(Slot::QsPowerConfirm(PowerAction::Restart)).is_none());
     }
 
     #[test]
@@ -6512,7 +6527,7 @@ mod tests {
             return;
         };
         let painter = painter();
-        let mut icons = crate::icon::IconLoader::default();
+        let mut icons = crate::icon::IconLoader::new(std::env::var("GLIDE_QS_PREVIEW_ICONS").ok());
         let save = |canvas: &Canvas<'_>, file: String| {
             let (w, h) = ((canvas.w * canvas.scale) as u32, (canvas.h * canvas.scale) as u32);
             let image = glide_shell::image::Image::from_bgra(w, h, canvas.buf.clone()).expect("image");
