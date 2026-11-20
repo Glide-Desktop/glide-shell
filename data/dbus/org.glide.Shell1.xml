@@ -64,7 +64,7 @@
       <arg name="level" type="u" direction="in"/>
       <arg name="on" type="b" direction="in"/>
     </method>
-    <!-- view: "" for the main view, or "wifi", "bluetooth", "sound", "battery", "netbird". -->
+    <!-- view: "" for the main view, or "network", "bluetooth", "sound", "battery", "power", "vpn"; "wifi" and "netbird" are older names for "network" and "vpn". -->
     <method name="OpenQuickSettings">
       <arg name="view" type="s" direction="in"/>
     </method>

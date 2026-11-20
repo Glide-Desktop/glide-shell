@@ -410,8 +410,7 @@ pub fn request(request: NetRequest) {
 }
 
 fn emit_wifi() {
-    emit(NetEvent::Wifi(scan_wifi("auto")));
-    emit(NetEvent::WifiInfo(connected_wifi_info()));
+    emit_scanned(scan_wifi("auto"));
 }
 
 fn run_request(request: NetRequest) {
@@ -419,8 +418,11 @@ fn run_request(request: NetRequest) {
         NetRequest::ScanWifi => emit_wifi(),
         NetRequest::RescanWifi => {
             emit(NetEvent::WifiScanning(true));
-            emit(NetEvent::Wifi(scan_wifi("yes")));
-            emit(NetEvent::WifiInfo(connected_wifi_info()));
+            let scanned = scan_wifi("yes").or_else(|| {
+                tracing::debug!("a forced wi-fi scan was refused; listing what NetworkManager has");
+                scan_wifi("no")
+            });
+            emit_scanned(scanned);
             emit(NetEvent::WifiScanning(false));
         }
         NetRequest::ForgetWifi { ssid } => {
@@ -527,18 +529,23 @@ fn stdout_of(program: &str, args: &[&str]) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn scan_wifi(rescan: &str) -> Vec<WifiNetwork> {
-    let Some(list) = stdout_of(
+fn scan_wifi(rescan: &str) -> Option<Vec<WifiNetwork>> {
+    let list = stdout_of(
         "nmcli",
         &["-t", "-f", "IN-USE,SSID,SECURITY,SIGNAL,BARS", "dev", "wifi", "list", "--rescan", rescan],
-    ) else {
-        return Vec::new();
-    };
+    )?;
     let mut networks = parse_wifi_list(&list);
     let saved: Vec<String> = saved_wifi_profiles().into_iter().map(|(ssid, _)| ssid).collect();
     mark_saved(&mut networks, &saved);
     sort_networks(&mut networks);
-    networks
+    Some(networks)
+}
+
+fn emit_scanned(networks: Option<Vec<WifiNetwork>>) {
+    if let Some(networks) = networks {
+        emit(NetEvent::Wifi(networks));
+    }
+    emit(NetEvent::WifiInfo(connected_wifi_info()));
 }
 
 #[must_use]

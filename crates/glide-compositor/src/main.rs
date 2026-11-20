@@ -606,6 +606,7 @@ fn init_quick_settings_network(event_loop: &mut EventLoop<'static, GlideState>) 
     let (send, receiver) = sink::<qs_net::NetEvent>("a network panel update");
     qs_net::install(send);
     watch(event_loop, receiver, "the network panel channel", GlideState::handle_net_event);
+    GlideState::refresh_quick_settings_lists();
 
     let rescan = event_loop.handle().insert_source(Timer::from_duration(qs_net::RESCAN_INTERVAL), |_, (), state| {
         state.rescan_quick_settings_panel();

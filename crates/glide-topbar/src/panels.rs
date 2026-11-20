@@ -174,7 +174,7 @@ const fn power_verb(action: PowerAction) -> Key {
 pub(super) fn apps_note(apps: &[String]) -> String {
     let names = match apps {
         [] => return t(Key::QsNoAppsOpen).to_string(),
-        [one] => one.clone(),
+        [one] => return t(Key::QsAppWillClose).replace("{apps}", one),
         [first, second] => format!("{first} {} {second}", t(Key::QsAnd)),
         [first, second, rest @ ..] => {
             let more = t(Key::QsAndMore).replace("{n}", &rest.len().to_string());
@@ -1412,8 +1412,8 @@ pub(super) fn push_detail<R>(
     let Some(buffer) = topbar.qs_detail_cache.resolve(key, output_scale, || {
         let ctx = QsRenderContext { painter, theme, hovered };
         let mut canvas = Canvas::new(rect.size.w, height, output_scale)?.with_icons(Some(icons));
-        let full = canvas.full();
-        canvas.fill(full, theme.popover_bg, super::QS_RADIUS);
+        let inner = local_rect(1, 1, rect.size.w - 2, height - 2);
+        canvas.fill(inner, theme.popover_bg, super::QS_RADIUS - 1.0);
         let position = f64::from(profile) / super::MOTION_QUANTUM;
         draw_detail(&mut canvas, &ctx, panel, detail, status, position);
         Some(canvas.finish())

@@ -428,6 +428,7 @@ glide_app::catalogue! {
     QsAskRestartShort => "Restart the computer?", "Перезапустити комп\u{2019}ютер?";
     QsAskShutDownShort => "Shut down the computer?", "Вимкнути комп\u{2019}ютер?";
     QsAppsWillClose => "{apps} will be asked to close. If they have unsaved work, they will ask.", "{apps} попросять закритися. Якщо в них є незбережене, вони спитають самі.";
+    QsAppWillClose => "{apps} will be asked to close. If it has unsaved work, it will ask.", "{apps} попросять закритися. Якщо в неї є незбережене, вона спитає сама.";
     QsNoAppsOpen => "No apps are open, nothing will be lost.", "Відкритих програм немає, нічого не загубиться.";
     QsAnd => "and", "і";
     QsAndMore => "and {n} more", "і ще {n}";

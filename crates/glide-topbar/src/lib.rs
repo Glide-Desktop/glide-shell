@@ -3946,7 +3946,42 @@ fn push_quick_settings<R: ShellRenderer>(topbar: &mut Topbar, frame: &mut Frame<
             push_popup_buffer(renderer, background, rect, rect, reveal, scale, elements);
         }
     }
-    push_rounded_popup_shadow(topbar, renderer, (rect, QS_RADIUS), reveal, scale, output_scale, elements);
+    if topbar.qs_height.is_animating() && reveal >= 1.0 {
+        push_stretched_qs_shadow(topbar, renderer, rect, (scale, output_scale), elements);
+    } else {
+        push_rounded_popup_shadow(topbar, renderer, (rect, QS_RADIUS), reveal, scale, output_scale, elements);
+    }
+}
+
+fn push_stretched_qs_shadow<R: ShellRenderer>(
+    topbar: &mut Topbar, renderer: &mut R, rect: Rectangle<i32, Logical>, (scale, output_scale): (Scale<f64>, i32),
+    elements: &mut Vec<MemoryRenderBufferRenderElement<R>>,
+) {
+    let margin = popup_shadow_margin(topbar.theme.dark);
+    let drawn = Size::from((rect.size.w, topbar.qs_height.target().round() as i32));
+    let key = (drawn.w, drawn.h, output_scale, QS_RADIUS.to_bits());
+    if let std::collections::hash_map::Entry::Vacant(entry) = topbar.shadows.entry(key)
+        && let Some(buffer) = draw_popup_shadow(topbar.theme.dark, drawn, (margin, QS_RADIUS), output_scale)
+    {
+        entry.insert(buffer);
+    }
+    let Some(buffer) = topbar.shadows.get(&key) else {
+        return;
+    };
+    let source = Rectangle::from_size(Size::from((drawn.w + margin * 2, drawn.h + margin * 2)).to_f64());
+    let target = Size::from((rect.size.w + margin * 2, rect.size.h + margin * 2));
+    let at = Point::from((rect.loc.x - margin, rect.loc.y - margin));
+    if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+        renderer,
+        at.to_f64().to_physical(scale),
+        buffer,
+        None,
+        Some(source),
+        Some(target),
+        Kind::Unspecified,
+    ) {
+        elements.push(element);
+    }
 }
 
 fn draw_qs_background((w, h): (i32, i32), theme: &TopbarTheme, scale: i32) -> Option<MemoryRenderBuffer> {
@@ -3988,9 +4023,9 @@ fn push_qs_main<R: ShellRenderer>(
         return;
     };
     let shown = geometry.height.min(rect.size.h);
-    let element = Rectangle::new(Point::from((left, rect.loc.y)), Size::from((rect.size.w, shown)));
+    let element = Rectangle::new(rect.loc, Size::from((rect.size.w - shift, shown)));
     let placed = Placed { popup: rect, element, progress: reveal, alpha };
-    push_placed_from(renderer, buffer, placed, Some(Point::from((0, 0))), scale, elements);
+    push_placed_from(renderer, buffer, placed, Some(Point::from((shift, 0))), scale, elements);
 }
 
 struct QsRenderContext<'a> {
