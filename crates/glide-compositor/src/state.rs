@@ -1828,6 +1828,7 @@ impl GlideState {
 
     pub fn set_night_light_config(&mut self, config: crate::config::NightLightConfig) {
         let retint = self.night_light.temperature != config.temperature;
+        self.topbar.set_night_light_until(config.schedule.then(|| config.to.clone()));
         self.night_light = config;
         if retint && self.topbar.system_status().night_light_on {
             self.apply_night_light(true);

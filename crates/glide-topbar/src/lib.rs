@@ -882,6 +882,8 @@ pub struct Topbar {
     qs_cache: Cache<QsCacheKey>,
     qs_spin_cache: Cache<(u8, i32, i32)>,
     qs_height: Anim,
+    night_light_until: Option<String>,
+    volume_max: u8,
     qs_bg_cache: Cache<(i32, i32)>,
     qs_sliders: HashMap<SliderKey, MemoryRenderBuffer>,
     qs_detail_cache: Cache<panels::DetailKey>,
@@ -1500,7 +1502,8 @@ impl Topbar {
             Slot::QsBrightnessTrack => self.system_status.brightness_pct,
             _ => return None,
         };
-        let pct = u8::try_from((i32::from(current) + i32::from(delta)).clamp(0, 100)).ok()?;
+        let ceiling = if slot == Slot::QsVolumeTrack { self.volume_ceiling() } else { 100 };
+        let pct = u8::try_from((i32::from(current) + i32::from(delta)).clamp(0, i32::from(ceiling))).ok()?;
         let action = match slot {
             Slot::QsVolumeTrack => {
                 self.system_status.volume_pct = pct;
@@ -1844,6 +1847,9 @@ impl Topbar {
     }
 
     fn headsets_changed(&mut self) {
+        self.qs_panel.headset_batteries =
+            self.headsets.iter().filter_map(|headset| headset.battery.map(|pct| (headset.mac.clone(), pct))).collect();
+        self.qs_panel.bump();
         self.status_rev = self.status_rev.wrapping_add(1);
         self.touch();
     }
@@ -1865,6 +1871,27 @@ impl Topbar {
     #[must_use]
     pub const fn phone(&self) -> Option<&crate::phone::PhoneState> {
         self.phone.as_ref()
+    }
+
+    pub fn set_volume_max(&mut self, pct: u8) {
+        let pct = pct.max(100);
+        if self.volume_max != pct {
+            self.volume_max = pct;
+            self.status_rev = self.status_rev.wrapping_add(1);
+            self.touch();
+        }
+    }
+
+    const fn volume_ceiling(&self) -> u8 {
+        if self.volume_max > 100 { self.volume_max } else { 100 }
+    }
+
+    pub fn set_night_light_until(&mut self, until: Option<String>) {
+        if self.night_light_until != until {
+            self.night_light_until = until;
+            self.status_rev = self.status_rev.wrapping_add(1);
+            self.touch();
+        }
     }
 
     #[must_use]
@@ -2086,7 +2113,7 @@ impl Topbar {
         self.slots.iter().find(|(_, rect)| rect.to_f64().contains(pos)).map(|(slot, rect)| match slot {
             Slot::QsVolumeTrack => {
                 let ratio = ((pos.x - f64::from(rect.loc.x)) / f64::from(rect.size.w)).clamp(0.0, 1.0);
-                let pct = (ratio * 100.0).round() as u8;
+                let pct = (ratio * f64::from(self.volume_ceiling())).round() as u8;
                 TopbarAction::QsVolumeAdjust(pct)
             }
             Slot::QsMicTrack => {
@@ -2452,7 +2479,7 @@ fn qs_tiles(shape: QsShape) -> impl Iterator<Item = QsTile> {
         QsTile::Network => shape.network,
         QsTile::Bluetooth => shape.bluetooth,
         QsTile::Vpn => shape.vpn,
-        QsTile::Saver => shape.profile,
+        QsTile::Saver => shape.profile && shape.battery,
         QsTile::Dnd | QsTile::NightLight | QsTile::DarkTheme | QsTile::Caffeine => true,
     })
 }
@@ -4013,10 +4040,21 @@ fn push_qs_main<R: ShellRenderer>(
     let theme = &topbar.theme;
     let status = &topbar.system_status;
     let panel = &topbar.qs_panel;
+    let night_until = topbar.night_light_until.as_deref();
+    let volume_max = topbar.volume_ceiling();
     let Some(buffer) = topbar.qs_cache.resolve(key, output_scale, || {
         let ctx = QsRenderContext { painter, theme, hovered };
         let mut canvas = Canvas::new(rect.size.w, geometry.height, output_scale)?.with_icons(Some(icons));
-        let draw = QsDraw { status, panel, geometry: geometry.clone(), flags, motion, sliders: false };
+        let draw = QsDraw {
+            status,
+            panel,
+            geometry: geometry.clone(),
+            flags,
+            motion,
+            sliders: false,
+            night_until,
+            volume_max,
+        };
         draw_quick_settings(&mut canvas, &ctx, &draw);
         Some(canvas.finish())
     }) else {
@@ -4063,6 +4101,8 @@ struct QsDraw<'a> {
     flags: QsFlags,
     motion: QsMotion,
     sliders: bool,
+    night_until: Option<&'a str>,
+    volume_max: u8,
 }
 
 fn percent(value: f64) -> u8 {
@@ -4212,6 +4252,21 @@ struct QsTrack {
     muted: bool,
     enabled: bool,
     thumb: QsThumb,
+    max: u8,
+}
+
+impl QsTrack {
+    const fn new(pct: u8, muted: bool, enabled: bool) -> Self {
+        Self { pct, muted, enabled, thumb: QsThumb::Rest, max: 100 }
+    }
+}
+
+const QS_MARK_W: i32 = 2;
+const QS_MARK_H: i32 = 10;
+
+fn track_x(rect: LocalRect, pct: u8, max: u8) -> i32 {
+    let max = f64::from(max.max(1));
+    ((f64::from(rect.size.w) * f64::from(pct).min(max)) / max).round() as i32
 }
 
 fn draw_qs_track(c: &mut Canvas<'_>, theme: &TopbarTheme, rect: LocalRect, track: QsTrack) {
@@ -4221,10 +4276,15 @@ fn draw_qs_track(c: &mut Canvas<'_>, theme: &TopbarTheme, rect: LocalRect, track
     if !track.enabled {
         return;
     }
-    let fill_w = ((f64::from(rect.size.w) * f64::from(track.pct.min(100))) / 100.0).round() as i32;
+    let fill_w = track_x(rect, track.pct, track.max);
     if fill_w > 0 {
         let colour = if track.muted { theme.track } else { theme.active_background };
         c.fill(bar(fill_w), colour, R1);
+    }
+    if track.max > 100 {
+        let x = rect.loc.x + track_x(rect, 100, track.max) - QS_MARK_W / 2;
+        let mark = local_rect(x, rect.loc.y + (rect.size.h - QS_MARK_H) / 2, QS_MARK_W, QS_MARK_H);
+        c.fill(mark, theme.faint, 1.0);
     }
     let centre = (rect.loc.x + fill_w, rect.loc.y + rect.size.h / 2);
     let circle = |side: i32| local_rect(centre.0 - side / 2, centre.1 - side / 2, side, side);
@@ -4245,7 +4305,7 @@ enum SliderKind {
     Brightness,
 }
 
-type SliderKey = (SliderKind, u8, bool, bool, QsThumb, i32, u64);
+type SliderKey = ((SliderKind, u8), u8, bool, bool, QsThumb, i32, u64);
 
 const SLIDER_HALO: i32 = 18;
 
@@ -4273,19 +4333,15 @@ fn qs_slider_layers(
         Slot::QsVolumeTrack,
         geometry.volume,
         QsTrack {
-            pct: live.volume,
-            muted: status.volume_muted,
-            enabled: status.volume_available,
-            thumb: QsThumb::Rest,
+            max: topbar.volume_ceiling(),
+            ..QsTrack::new(live.volume, status.volume_muted, status.volume_available)
         },
     )];
     if let Some(mic) = geometry.mic {
-        let track = QsTrack { pct: live.mic, muted: status.mic_muted, enabled: true, thumb: QsThumb::Rest };
-        rows.push((SliderKind::Mic, Slot::QsMicTrack, mic, track));
+        rows.push((SliderKind::Mic, Slot::QsMicTrack, mic, QsTrack::new(live.mic, status.mic_muted, true)));
     }
     if let Some(row) = geometry.brightness {
-        let track = QsTrack { pct: live.brightness, muted: false, enabled: true, thumb: QsThumb::Rest };
-        rows.push((SliderKind::Brightness, Slot::QsBrightnessTrack, row, track));
+        rows.push((SliderKind::Brightness, Slot::QsBrightnessTrack, row, QsTrack::new(live.brightness, false, true)));
     }
 
     let theme = &topbar.theme;
@@ -4299,8 +4355,15 @@ fn qs_slider_layers(
             union.size.w + SLIDER_HALO * 2,
             union.size.h + SLIDER_HALO * 2,
         );
-        let key: SliderKey =
-            (kind, track.pct, track.muted, track.enabled, track.thumb, scale, crate::paint::painter_generation());
+        let key: SliderKey = (
+            (kind, track.max),
+            track.pct,
+            track.muted,
+            track.enabled,
+            track.thumb,
+            scale,
+            crate::paint::painter_generation(),
+        );
         if !topbar.qs_sliders.contains_key(&key) {
             if topbar.qs_sliders.len() >= SLIDER_LAYERS {
                 topbar.qs_sliders.clear();
@@ -4527,7 +4590,13 @@ fn draw_qs_tiles(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, draw: &QsDraw<'_
                 let subtitle = if flags.dnd { t(Key::QsDndOnSub).to_string() } else { off() };
                 (t(Key::DoNotDisturb), subtitle, "notifications-disabled", moon)
             }
-            QsTile::NightLight => (t(Key::NightLight), on_off(status.night_light_on), "night-light", moon),
+            QsTile::NightLight => {
+                let subtitle = match draw.night_until {
+                    Some(until) if status.night_light_on => t(Key::QsUntil).replace("{}", until),
+                    _ => on_off(status.night_light_on),
+                };
+                (t(Key::NightLight), subtitle, "night-light", moon)
+            }
             QsTile::DarkTheme => (t(Key::QsDarkTheme), on_off(flags.dark), "dark-mode", moon),
             QsTile::Caffeine => {
                 let icon = if flags.caffeinated { "caffeine-cup-full" } else { "caffeine-cup-empty" };
@@ -4566,7 +4635,12 @@ fn draw_qs_sliders(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, draw: &QsDraw<
     if draw.sliders {
         draw_qs_readout(c, ctx, volume.readout, enabled.then_some((pct, muted)));
         let thumb = QsThumb::of(Slot::QsVolumeTrack, ctx.hovered, draw.flags.dragging);
-        draw_qs_track(c, theme, volume.track, QsTrack { pct, muted, enabled, thumb });
+        draw_qs_track(
+            c,
+            theme,
+            volume.track,
+            QsTrack { thumb, max: draw.volume_max, ..QsTrack::new(pct, muted, enabled) },
+        );
     }
 
     if let Some(mic) = geometry.mic {
@@ -4579,7 +4653,7 @@ fn draw_qs_sliders(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, draw: &QsDraw<
         if draw.sliders {
             draw_qs_readout(c, ctx, mic.readout, Some((pct, muted)));
             let thumb = QsThumb::of(Slot::QsMicTrack, ctx.hovered, draw.flags.dragging);
-            draw_qs_track(c, theme, mic.track, QsTrack { pct, muted, enabled: true, thumb });
+            draw_qs_track(c, theme, mic.track, QsTrack { thumb, ..QsTrack::new(pct, muted, true) });
         }
     }
 
@@ -4590,7 +4664,7 @@ fn draw_qs_sliders(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, draw: &QsDraw<
         if draw.sliders {
             draw_qs_readout(c, ctx, brightness.readout, Some((pct, false)));
             let thumb = QsThumb::of(Slot::QsBrightnessTrack, ctx.hovered, draw.flags.dragging);
-            draw_qs_track(c, theme, brightness.track, QsTrack { pct, muted: false, enabled: true, thumb });
+            draw_qs_track(c, theme, brightness.track, QsTrack { thumb, ..QsTrack::new(pct, false, true) });
         }
     }
 }
@@ -6614,6 +6688,8 @@ mod tests {
                     flags,
                     motion,
                     sliders: true,
+                    night_until: Some("07:00"),
+                    volume_max: 150,
                 };
                 draw_quick_settings(&mut canvas, &ctx, &draw);
             }
@@ -6736,6 +6812,8 @@ mod tests {
                     flags,
                     motion,
                     sliders: true,
+                    night_until: Some("07:00"),
+                    volume_max: 150,
                 };
                 draw_quick_settings(&mut canvas, &ctx, &draw);
                 save(&canvas, format!("qs-{name}-{appearance:?}.png"));

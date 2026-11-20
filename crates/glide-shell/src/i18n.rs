@@ -380,6 +380,7 @@ glide_app::catalogue! {
     QsLinkVpn => "VPN Settings", "Налаштування VPN";
     QsVpnSection => "Connections", "З\u{2019}єднання";
     QsForgetNetwork => "Forget Network", "Забути мережу";
+    QsUntil => "Until {}", "До {}";
     QsScanning => "Searching for networks\u{2026}", "Пошук мереж\u{2026}";
     QsScannedNow => "updated just now", "оновлено щойно";
     QsScannedAgo => "updated {n} s ago", "оновлено {n} с тому";

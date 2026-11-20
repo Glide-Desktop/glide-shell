@@ -338,6 +338,60 @@ enum RowStatus {
 }
 
 #[derive(Debug, Default)]
+struct Accordion {
+    open: Option<(ItemKind, i32, i32)>,
+    closing: Option<(i32, i32)>,
+    progress: Anim,
+    shake: Option<std::time::Instant>,
+}
+
+impl Accordion {
+    fn shaking(&self) -> bool {
+        self.shake.is_some_and(|at| glide_ui::clock::since(at) < motion::t3())
+    }
+
+    fn is_animating(&self) -> bool {
+        self.progress.is_animating() || self.shaking()
+    }
+
+    fn follow(&mut self, now: Option<(ItemKind, i32, i32)>) {
+        let same = |a: Option<(ItemKind, i32, i32)>, b: Option<(ItemKind, i32, i32)>| a.map(|x| x.0) == b.map(|x| x.0);
+        if same(self.open, now) {
+            self.open = now;
+            return;
+        }
+        match (self.open, now) {
+            (_, Some(_)) => {
+                self.closing = None;
+                self.progress.jump(0.0);
+                self.progress.retarget(1.0, motion::t3(), E_OUT);
+            }
+            (Some((_, y, h)), None) => {
+                self.closing = Some((y, h));
+                self.progress.jump(1.0);
+                self.progress.retarget(0.0, motion::t3(), E_OUT);
+            }
+            (None, None) => {}
+        }
+        self.open = now;
+    }
+}
+
+const SHAKE: [(f64, f64); 6] = [(0.0, 0.0), (0.2, -8.0), (0.4, 6.0), (0.6, -4.0), (0.8, 2.0), (1.0, 0.0)];
+
+fn shake_offset(progress: f64) -> i32 {
+    let t = E_OUT.ease_f64(progress.clamp(0.0, 1.0));
+    SHAKE
+        .windows(2)
+        .find(|pair| t <= pair[1].0)
+        .map_or(0.0, |pair| {
+            let span = (t - pair[0].0) / (pair[1].0 - pair[0].0);
+            pair[0].1 + (pair[1].1 - pair[0].1) * span
+        })
+        .round() as i32
+}
+
+#[derive(Debug, Default)]
 struct Scan {
     running: bool,
     finished: Option<std::time::Instant>,
@@ -362,6 +416,8 @@ pub(super) struct DetailPanel {
     expanded: Option<String>,
     opener: Option<Slot>,
     origin: Option<LocalRect>,
+    pub(super) headset_batteries: Vec<(String, u8)>,
+    accordion: Accordion,
     sound_scroll: usize,
     list_scroll: usize,
     pending: Option<Pending>,
@@ -401,7 +457,7 @@ impl DetailPanel {
     }
 
     pub(super) fn is_animating(&self) -> bool {
-        self.slide.is_animating() || self.spinning()
+        self.slide.is_animating() || self.spinning() || self.accordion.is_animating()
     }
 
     fn spinning(&self) -> bool {
@@ -596,6 +652,7 @@ pub(super) struct PromptParts {
 }
 
 const ACCORDION_INDENT: i32 = ROW_PAD + ROW_WELL + ROW_GAP;
+const ACCORDION_RISE: i32 = 6;
 
 const fn prompt_height(failed: bool) -> i32 {
     let error = if failed { PROMPT_ERROR + SP2 } else { 0 };
@@ -1298,6 +1355,7 @@ impl Topbar {
                 self.settle_pending(&ssid, result);
                 if result == Err(ConnectError::WrongPassword) && self.detail() == Some(Detail::Wifi) {
                     self.qs_panel.prompt = Some(Prompt::new(ssid));
+                    self.qs_panel.accordion.shake = Some(glide_ui::clock::now());
                     self.set_focused(Some(Slot::QsPasswordField));
                 }
             }
@@ -1384,7 +1442,7 @@ fn prompt_pills(painter: &crate::paint::Painter) -> (i32, i32) {
     )
 }
 
-pub(super) type DetailKey = ((u64, u64, u64), Option<Slot>, Detail, i32, u8);
+pub(super) type DetailKey = ((u64, u64, u64), Option<Slot>, Detail, (i32, bool), u8);
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_detail<R>(
@@ -1405,7 +1463,8 @@ pub(super) fn push_detail<R>(
     let profile = super::quantize(topbar.profile_anim.value(), super::MOTION_QUANTUM);
     let revs = (topbar.qs_panel.rev, topbar.detail_rev, topbar.status_rev);
     let height = topbar.page_height(Some(painter), detail);
-    let key: DetailKey = (revs, hovered, detail, height, profile);
+    let shaking = topbar.qs_panel.accordion.shaking();
+    let key: DetailKey = (revs, hovered, detail, (height, shaking), profile);
     let theme = &topbar.theme;
     let status = &topbar.system_status;
     let panel = &topbar.qs_panel;
@@ -1426,15 +1485,87 @@ pub(super) fn push_detail<R>(
     if clip.size.w <= 0 || clip.size.h <= 0 {
         return;
     }
+    let body = detail_geometry(height, has_radio(detail), has_link(detail)).body;
+    let items = detail_items(&topbar.qs_panel, detail, &topbar.system_status, body, Some(painter));
+    let open = items
+        .iter()
+        .find(|item| matches!(item.kind, ItemKind::Prompt(_) | ItemKind::Info(_) | ItemKind::PowerConfirm(_)))
+        .map(|item| (item.kind, item.rect.loc.y, item.rect.size.h));
+    topbar.qs_panel.accordion.follow(open);
     if topbar.qs_panel.spinning() {
-        let body = detail_geometry(height, has_radio(detail), has_link(detail)).body;
-        let items = detail_items(&topbar.qs_panel, detail, &topbar.system_status, body, Some(painter));
         let marks = motion_marks(&topbar.qs_panel, &items, painter);
         push_marks(topbar, renderer, (rect, clip, reveal), &marks, (scale, output_scale), elements);
     }
-    let element = Rectangle::new(rect.loc + clip.loc, clip.size);
-    let placed = Placed { popup: rect, element, progress: reveal, alpha: 1.0 };
-    super::push_placed_from(renderer, &buffer, placed, Some(clip.loc), scale, elements);
+    if shaking && let Some(prompt) = items.iter().find(|item| matches!(item.kind, ItemKind::Prompt(_))) {
+        push_shaking_field(topbar, renderer, painter, (rect, prompt), (scale, output_scale), elements);
+    }
+    let bands =
+        if slide >= 1.0 { accordion_bands(&topbar.qs_panel.accordion, height) } else { vec![(0, 0, height, 1.0)] };
+    for (src_y, dst_y, band_h, alpha) in bands {
+        let top = dst_y.max(clip.loc.y);
+        let bottom = (dst_y + band_h).min(clip.loc.y + clip.size.h);
+        if bottom <= top {
+            continue;
+        }
+        let element = Rectangle::new(
+            rect.loc + smithay::utils::Point::from((clip.loc.x, top)),
+            smithay::utils::Size::from((clip.size.w, bottom - top)),
+        );
+        let origin = smithay::utils::Point::from((clip.loc.x, src_y + top - dst_y));
+        let placed = Placed { popup: rect, element, progress: reveal, alpha };
+        super::push_placed_from(renderer, &buffer, placed, Some(origin), scale, elements);
+    }
+}
+
+fn accordion_bands(accordion: &Accordion, height: i32) -> Vec<(i32, i32, i32, f32)> {
+    let progress = accordion.progress.value().clamp(0.0, 1.0);
+    if !accordion.progress.is_animating() {
+        return vec![(0, 0, height, 1.0)];
+    }
+    if let (Some((_, y, h)), None) = (accordion.open, accordion.closing) {
+        let shown = (f64::from(h) * progress).round() as i32;
+        let rise = (f64::from(ACCORDION_RISE) * (1.0 - progress)).round() as i32;
+        let alpha = (progress / 0.4).min(1.0) as f32;
+        return vec![(0, 0, y, 1.0), (y + rise, y, shown, alpha), (y + h, y + shown, height - y - h, 1.0)];
+    }
+    if let Some((y, h)) = accordion.closing {
+        let gap = (f64::from(h) * progress).round() as i32;
+        return vec![(0, 0, y, 1.0), (y, y + gap, height - y, 1.0)];
+    }
+    vec![(0, 0, height, 1.0)]
+}
+
+fn push_shaking_field<R>(
+    topbar: &Topbar, renderer: &mut R, painter: &crate::paint::Painter,
+    (rect, prompt): (Rectangle<i32, Logical>, &DetailItem), (scale, output_scale): (Scale<f64>, i32),
+    elements: &mut Vec<MemoryRenderBufferRenderElement<R>>,
+) where
+    R: crate::raster::ShellRenderer,
+{
+    let (Some(field_prompt), Some(started)) = (topbar.qs_panel.prompt.as_ref(), topbar.qs_panel.accordion.shake) else {
+        return;
+    };
+    let failed = matches!(prompt.kind, ItemKind::Prompt(index) if topbar.qs_panel.failed(index));
+    let parts = prompt_parts(prompt.rect, failed, prompt_pills(painter));
+    let halo = 3;
+    let area = local_rect(
+        parts.field.loc.x - halo,
+        parts.field.loc.y - halo,
+        parts.field.size.w + halo * 2,
+        parts.field.size.h + halo * 2,
+    );
+    let Some(canvas) = Canvas::new(area.size.w, area.size.h, output_scale) else {
+        return;
+    };
+    let mut canvas = canvas;
+    let shift = |r: LocalRect| Rectangle::new(r.loc - area.loc, r.size);
+    let ctx = QsRenderContext { painter, theme: &topbar.theme, hovered: None };
+    draw_password_field(&mut canvas, &ctx, (shift(parts.field), shift(parts.reveal)), field_prompt, failed);
+    let buffer = canvas.finish();
+    let progress = glide_ui::clock::since(started).as_secs_f64() / motion::t3().as_secs_f64().max(f64::EPSILON);
+    let dx = shake_offset(progress);
+    let element = Rectangle::new(rect.loc + area.loc + smithay::utils::Point::from((dx, 0)), area.size);
+    super::push_placed(renderer, &buffer, Placed { popup: rect, element, progress: 1.0, alpha: 1.0 }, scale, elements);
 }
 
 fn push_marks<R>(
@@ -1585,7 +1716,7 @@ fn draw_item(
         }
         ItemKind::Prompt(index) => {
             if let Some(prompt) = panel.prompt.as_ref() {
-                draw_prompt(c, ctx, rect, prompt, panel.failed(index));
+                draw_prompt(c, ctx, rect, prompt, (panel.failed(index), panel.accordion.shaking()));
             }
         }
         ItemKind::Info(_) => draw_info(c, ctx, rect, panel.wifi_info.as_ref()),
@@ -1598,7 +1729,12 @@ fn draw_item(
             let drawer =
                 if matches!(item.kind, ItemKind::Output(_)) { super::Drawer::Output } else { super::Drawer::Input };
             if let Some(device) = panel.devices(drawer).get(index) {
-                draw_audio_row(c, ctx, rect, device, panel.status_for(&device.name));
+                let battery = panel
+                    .headset_batteries
+                    .iter()
+                    .find(|(mac, _)| device.name.starts_with("bluez_") && device.name.contains(mac.as_str()))
+                    .map(|(_, pct)| *pct);
+                draw_audio_row(c, ctx, rect, device, (panel.status_for(&device.name), battery));
             }
         }
         ItemKind::MicSlider if item.slot.is_none() => draw_mic_slider(c, ctx, rect, status),
@@ -2065,8 +2201,13 @@ fn draw_device_row(
 }
 
 fn draw_audio_row(
-    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, device: &AudioOutput, status: RowStatus,
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, device: &AudioOutput,
+    (status, battery): (RowStatus, Option<u8>),
 ) {
+    let kind = battery.map_or_else(
+        || t(super::qs_device_kind(device.icon)).to_string(),
+        |pct| format!("Bluetooth \u{b7} {}", t(Key::QsRowBattery).replace("{}", &pct.to_string())),
+    );
     let tail = if busy(status) {
         Tail::Busy
     } else if device.active {
@@ -2078,7 +2219,7 @@ fn draw_audio_row(
         icon: device.icon,
         glyph: |b, w, h, side, stroke, s, c| crate::paint::draw_speaker_glyph_over(b, w, h, side, stroke, false, s, c),
         title: &device.description,
-        subtitle: subtitle_with((ctx.theme, status), t(super::qs_device_kind(device.icon)).to_string()),
+        subtitle: subtitle_with((ctx.theme, status), kind),
         on: device.active,
         tail,
     };
@@ -2141,7 +2282,7 @@ fn draw_mic_slider(
     super::draw_qs_mic_glyph(c, row.icon, (muted, colour));
     super::draw_qs_readout(c, ctx, row.readout, Some((pct, muted)));
     let thumb = super::QsThumb::of(Slot::QsMicTrack, ctx.hovered, None);
-    super::draw_qs_track(c, ctx.theme, row.track, super::QsTrack { pct, muted, enabled: true, thumb });
+    super::draw_qs_track(c, ctx.theme, row.track, super::QsTrack { thumb, ..super::QsTrack::new(pct, muted, true) });
 }
 
 const fn vpn_kind_key(kind: VpnKind) -> Key {
@@ -2258,9 +2399,13 @@ fn draw_button(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, l
     c.text_in(ctx.painter, rect, TextAlign::Center, label, ink, &super::QS_PILL_TEXT);
 }
 
-fn draw_prompt(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, prompt: &Prompt, failed: bool) {
+fn draw_prompt(
+    c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, prompt: &Prompt, (failed, shaking): (bool, bool),
+) {
     let parts = prompt_parts(rect, failed, prompt_pills(ctx.painter));
-    draw_password_field(c, ctx, (parts.field, parts.reveal), prompt, failed);
+    if !shaking {
+        draw_password_field(c, ctx, (parts.field, parts.reveal), prompt, failed);
+    }
     if let Some(error) = parts.error {
         let text = t(Key::QsWrongPasswordRetry);
         c.text_in(ctx.painter, error, TextAlign::Left, text, ctx.theme.danger, &super::QS_NOTE);
@@ -2827,6 +2972,48 @@ mod tests {
         assert!(busy.spinners.iter().all(|spinner| body.contains(spinner.loc)));
         for step in 0..SPIN_STEPS {
             assert!(draw_spinner_arc(16, step, TopbarTheme::default().active_background, 2).is_some());
+        }
+    }
+
+    #[test]
+    fn an_accordion_unfolds_under_its_row_and_folds_back() {
+        let mut accordion = Accordion::default();
+        assert_eq!(accordion_bands(&accordion, 400), [(0, 0, 400, 1.0)]);
+        accordion.follow(Some((ItemKind::Prompt(1), 150, 90)));
+        if motion::t3().is_zero() {
+            return;
+        }
+        let bands = accordion_bands(&accordion, 400);
+        assert_eq!(bands.len(), 3, "rows above, the unfolding content, rows below");
+        assert_eq!(bands[0], (0, 0, 150, 1.0));
+        assert_eq!(bands[1].1, 150);
+        assert!(bands[1].2 < 90 && bands[1].3 < 1.0, "the content is still opening");
+        assert_eq!(bands[2].0, 240, "the rows below start where the accordion ends");
+        assert!(bands[2].1 < 240, "and are drawn higher while it opens");
+        accordion.follow(Some((ItemKind::Prompt(1), 150, 110)));
+        assert!(accordion.progress.is_animating(), "a taller drawer of the same accordion does not restart it");
+        accordion.follow(None);
+        assert_eq!(accordion.closing, Some((150, 110)));
+        let closing = accordion_bands(&accordion, 400);
+        assert_eq!(closing[1].0, 150);
+        assert!(closing[1].1 > 150, "the rows below begin low and rise into the gap");
+    }
+
+    #[test]
+    fn a_wrong_password_shakes_the_field_left_and_right_and_settles() {
+        assert_eq!(shake_offset(0.0), 0);
+        assert_eq!(shake_offset(1.0), 0);
+        let offsets: Vec<i32> = (0..=400).map(|step| shake_offset(f64::from(step) / 400.0)).collect();
+        assert!(offsets.iter().any(|dx| *dx <= -6) && offsets.iter().any(|dx| *dx >= 4), "{offsets:?}");
+        let mut bar = open_wifi();
+        bar.toggle_prompt("Neighbour");
+        bar.apply_net_event(NetEvent::WifiResult {
+            ssid: "Neighbour".into(),
+            result: Err(ConnectError::WrongPassword),
+        });
+        assert!(bar.qs_panel.accordion.shake.is_some());
+        if !motion::t3().is_zero() {
+            assert!(bar.qs_panel.accordion.shaking() && bar.qs_panel.is_animating());
         }
     }
 

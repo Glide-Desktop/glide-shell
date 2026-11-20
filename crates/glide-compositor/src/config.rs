@@ -1231,6 +1231,7 @@ impl Config {
             toolkits: glide_config::toolkits::Support::detect(),
         });
         state.max_volume_pct = self.topbar.max_volume_pct.clamp(100, 150);
+        state.topbar.set_volume_max(state.max_volume_pct);
         state.app_menus.registrar = self.topbar.appmenu_registrar;
         state.set_global_menu_enabled(self.topbar.global_menu);
         state.configure_tray(&self.topbar, dock.theme.icon_theme.clone());
