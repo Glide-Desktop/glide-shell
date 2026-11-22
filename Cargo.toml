@@ -9,6 +9,8 @@ members = [
     "crates/glide-greeter",
     "crates/glide-launcher",
     "crates/glide-layout",
+    "crates/glide-log-ipc",
+    "crates/glide-logd",
     "crates/glide-media",
     "crates/glide-notify",
     "crates/glide-overlays",
@@ -24,7 +26,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.96"
 license = "GPL-3.0-or-later"

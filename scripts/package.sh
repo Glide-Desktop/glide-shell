@@ -30,11 +30,11 @@ STAGE="$REPO/dist/$NAME"
 
 rm -rf "$STAGE"
 install -d "$STAGE/bin" "$STAGE/data" "$STAGE/scripts"
-for bin in glide glidectl glide-configd glide-settings glide-files glide-terminal glide-text glide-passwords glide-photos glide-folio glide-clips glide-catalog glide-portal glide-keychain glide-phone glide-welcome glide-xembed facekey; do
+for bin in glide glidectl glide-logd glide-configd glide-settings glide-files glide-terminal glide-text glide-passwords glide-photos glide-folio glide-clips glide-catalog glide-portal glide-keychain glide-phone glide-welcome glide-xembed facekey; do
     install -m755 "$REPO/target/release/$bin" "$STAGE/bin/$bin"
 done
 install -m755 "$REPO/target/release/libpam_glide_keychain.so" "$STAGE/bin/libpam_glide_keychain.so"
-for f in glide-session glide-lock glide.desktop glide.service glide-shutdown.target glide-portals.conf glide.portal org.freedesktop.impl.portal.desktop.glide.service org.glide.Files.service org.glide.Terminal.service org.glide.Phone.service org.glide.Config.service glide-files-search-provider.ini glide-terminal-search-provider.ini glide-settings.desktop glide-files.desktop glide-terminal.desktop glide-text.desktop glide-passwords.desktop glide-photos.desktop glide-folio.desktop glide-clips.desktop glide-catalog.desktop glide-phone.desktop glide-welcome.desktop glide-phone-autostart.desktop glide-phone.svg glide-folio.svg glide.svg greetd-glide.toml; do
+for f in glide-session glide-lock glide.desktop glide.service glide-logd.service glide-logd.tmpfiles glide-shutdown.target glide-portals.conf glide.portal org.freedesktop.impl.portal.desktop.glide.service org.glide.Files.service org.glide.Terminal.service org.glide.Phone.service org.glide.Config.service glide-files-search-provider.ini glide-terminal-search-provider.ini glide-settings.desktop glide-files.desktop glide-terminal.desktop glide-text.desktop glide-passwords.desktop glide-photos.desktop glide-folio.desktop glide-clips.desktop glide-catalog.desktop glide-phone.desktop glide-welcome.desktop glide-phone-autostart.desktop glide-phone.svg glide-folio.svg glide.svg greetd-glide.toml; do
     cp -p "$REPO/data/$f" "$STAGE/data/$f"
 done
 install -Dm644 "$REPO/data/pam.d/glide-lock" "$STAGE/data/pam.d/glide-lock"

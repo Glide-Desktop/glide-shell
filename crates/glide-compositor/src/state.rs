@@ -965,10 +965,7 @@ impl GlideState {
             return;
         };
         if crate::xembed::is_container(window.identity().0.as_deref(), self.window_pid(&window)) {
-            if let Some(handle) = self.foreign_toplevel_handles.remove(&id) {
-                handle.send_closed();
-                self.protocols.foreign_toplevel_list_state.remove_toplevel(&handle);
-            }
+            self.forget_window(id, &window);
             return;
         }
         self.layout.set_app(id, self.dock_key(id));
@@ -1277,6 +1274,7 @@ impl GlideState {
                 .and_then(|id| self.layout.window_state(id))
                 .map(|state| state.workspace_id)
                 .filter(|ws| *ws != self.layout.active_workspace());
+            tracing::info!(?select, ?target_workspace, "overview closing");
             if let Some(ws) = target_workspace {
                 self.finish_workspace_swipe();
                 self.layout.browse_workspace(glide_layout::WorkspaceTarget::Id(ws));
@@ -1289,8 +1287,12 @@ impl GlideState {
     }
 
     pub fn close_overview(&mut self) -> bool {
-        self.overview = None;
-        self.layout.close_overview()
+        let had_ui = self.overview.take().is_some();
+        let closed = self.layout.close_overview();
+        if had_ui || closed {
+            tracing::info!(had_ui, closed, "overview closed");
+        }
+        closed
     }
 
     pub fn begin_interactive_overview(&mut self) {

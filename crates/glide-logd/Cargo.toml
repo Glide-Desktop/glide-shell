@@ -1,0 +1,28 @@
+[package]
+name = "glide-logd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "glide-logd"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+flate2 = "1"
+glide-config.workspace = true
+glide-log-ipc = { path = "../glide-log-ipc" }
+libc = "0.2"
+rusqlite = "0.41"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "process"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -17,8 +17,8 @@ use smithay::{
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
         drm::{
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmNode,
-            compositor::FrameFlags,
+            DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmEventMetadata, DrmNode,
+            compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement, RenderFrameError},
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
@@ -237,7 +237,7 @@ struct SurfaceData {
     modes: Vec<smithay::reexports::drm::control::Mode>,
     pending_repaint: Option<RegistrationToken>,
     redraw_queued: bool,
-    flip_pending: Option<std::time::Instant>,
+    flip_stall: FlipStallTracker,
     switched_off: bool,
     wallpaper_buf: Option<MemoryRenderBuffer>,
     wallpaper_blur_buf: Option<MemoryRenderBuffer>,
@@ -256,6 +256,7 @@ struct SurfaceData {
     repaint_deadline: Option<std::time::Instant>,
     render_errors: crate::gpu_log::Throttle,
     flip_stalls: crate::gpu_log::Throttle,
+    recovery_logs: crate::gpu_log::Throttle,
 }
 
 pub(crate) struct DeviceData {
@@ -266,6 +267,7 @@ pub(crate) struct DeviceData {
     cursor: Cursor,
     cursor_buffers: CursorBuffers,
     pointer_element: PointerElement,
+    drm_errors: crate::gpu_log::Throttle,
 }
 
 pub struct TtyData {
@@ -371,7 +373,7 @@ pub fn init_tty(
                 }
 
                 for surface in device.surfaces.values_mut() {
-                    surface.flip_pending = None;
+                    surface.flip_stall.reset();
                 }
                 let crtcs: Vec<_> = device.surfaces.keys().copied().collect();
                 for crtc in crtcs {
@@ -554,6 +556,123 @@ const OVERVIEW_WALLPAPER_ZOOM: f64 = 1.06;
 const MIRROR_CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 const FLIP_WAIT: Duration = Duration::from_millis(100);
+
+const FLIP_RECOVERY_THRESHOLD: u32 = 3;
+
+#[derive(Debug, Default)]
+struct FlipStallTracker {
+    pending_since: Option<std::time::Instant>,
+    last_timeout_at: Option<std::time::Instant>,
+    consecutive_timeouts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlipGuardAction {
+    Ready,
+    Wait,
+    TimedOut { consecutive: u32, waited: Duration },
+    Recover { consecutive: u32, waited: Duration },
+}
+
+impl FlipStallTracker {
+    const fn on_queued(&mut self, now: std::time::Instant) {
+        self.pending_since = Some(now);
+        self.last_timeout_at = None;
+    }
+
+    const fn on_vblank(&mut self) {
+        self.pending_since = None;
+        self.last_timeout_at = None;
+        self.consecutive_timeouts = 0;
+    }
+
+    const fn reset(&mut self) {
+        self.pending_since = None;
+        self.last_timeout_at = None;
+        self.consecutive_timeouts = 0;
+    }
+
+    fn is_blocking_redraw(&self, now: std::time::Instant) -> bool {
+        let Some(since) = self.pending_since else {
+            return false;
+        };
+        let reference = self.last_timeout_at.unwrap_or(since);
+        now.saturating_duration_since(reference) < FLIP_WAIT
+    }
+
+    fn check(&mut self, now: std::time::Instant) -> FlipGuardAction {
+        let Some(since) = self.pending_since else {
+            return FlipGuardAction::Ready;
+        };
+        let reference = self.last_timeout_at.unwrap_or(since);
+        if now.saturating_duration_since(reference) < FLIP_WAIT {
+            return FlipGuardAction::Wait;
+        }
+        self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+        self.last_timeout_at = Some(now);
+        let waited = now.saturating_duration_since(since);
+        if self.consecutive_timeouts >= FLIP_RECOVERY_THRESHOLD {
+            FlipGuardAction::Recover { consecutive: self.consecutive_timeouts, waited }
+        } else {
+            FlipGuardAction::TimedOut { consecutive: self.consecutive_timeouts, waited }
+        }
+    }
+}
+
+fn wait_for_sync(sync: &smithay::backend::renderer::sync::SyncPoint, output: &str) {
+    for attempt in 0..3 {
+        match sync.wait() {
+            Ok(()) => return,
+            Err(err) if attempt == 2 => {
+                tracing::warn!(target: "glide::gpu", output, ?err, "primary swapchain sync wait interrupted");
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn recover_output_surface(surface: &mut SurfaceData, renderer: &mut GlesRenderer, reason: &'static str) {
+    let output_name = surface.output.name();
+    if let Err(err) = surface.drm_output.with_compositor(DrmCompositor::frame_submitted) {
+        tracing::warn!(
+            target: "glide::gpu",
+            output = %output_name,
+            reason,
+            ?err,
+            "failed to clear pending DRM frame during recovery"
+        );
+    }
+    surface.drm_output.reset_buffers();
+    if let Err(err) = surface.drm_output.with_compositor(DrmCompositor::reset_state) {
+        tracing::warn!(
+            target: "glide::gpu",
+            output = %output_name,
+            reason,
+            ?err,
+            "failed to reset DRM compositor state during recovery"
+        );
+    }
+    let current_mode = surface
+        .output
+        .current_mode()
+        .and_then(|wl_mode| surface.modes.iter().copied().find(|candidate| WlMode::from(*candidate) == wl_mode));
+    if let Some(drm_mode) = current_mode
+        && let Err(err) = surface.drm_output.use_mode(
+            drm_mode,
+            renderer,
+            &DrmOutputRenderElements::<GlesRenderer, GlideRenderElements>::default(),
+        )
+    {
+        tracing::warn!(
+            target: "glide::gpu",
+            output = %output_name,
+            reason,
+            ?err,
+            "failed to re-apply display mode during DRM recovery"
+        );
+    }
+    surface.flip_stall.reset();
+}
 
 fn report_frame_error(throttle: &mut crate::gpu_log::Throttle, output: &str, stage: &str, err: &dyn std::fmt::Debug) {
     match throttle.hit(std::time::Instant::now()) {
@@ -941,7 +1060,7 @@ impl GlideState {
         self.loop_handle
             .insert_source(drm_notifier, move |event, metadata, state| match event {
                 DrmEvent::VBlank(crtc) => state.frame_finish(crtc, metadata),
-                DrmEvent::Error(err) => tracing::error!("drm error: {:?}", err),
+                DrmEvent::Error(err) => state.handle_drm_error(&err),
             })
             .context("failed to register the DRM event source")?;
 
@@ -990,9 +1109,56 @@ impl GlideState {
             cursor: Cursor::load(),
             cursor_buffers: Vec::new(),
             pointer_element: PointerElement::default(),
+            drm_errors: crate::gpu_log::Throttle::default(),
         });
 
         self.scan_connectors()
+    }
+
+    fn handle_drm_error(&mut self, err: &DrmError) {
+        if !self.backend_data.session.is_active() || matches!(err, DrmError::DeviceInactive) {
+            tracing::debug!(target: "glide::gpu", ?err, "ignoring DRM event error while session is inactive");
+            return;
+        }
+        if let DrmError::Access(access) = err
+            && matches!(access.source.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted)
+        {
+            tracing::debug!(target: "glide::gpu", ?err, "transient DRM event error");
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let crtcs_to_repaint = {
+            let Some(device) = self.backend_data.device.as_mut() else {
+                tracing::error!(target: "glide::gpu", ?err, "DRM event error without active device");
+                return;
+            };
+            match device.drm_errors.hit(now) {
+                crate::gpu_log::Report::First => {
+                    tracing::error!(target: "glide::gpu", ?err, "DRM event error; resetting active outputs");
+                }
+                crate::gpu_log::Report::Summary(count) => {
+                    tracing::error!(target: "glide::gpu", count, ?err, "DRM event errors keep occurring");
+                }
+                crate::gpu_log::Report::Quiet => {}
+            }
+            let DeviceData { surfaces, gles_renderer, .. } = device;
+            let mut crtcs = Vec::new();
+            for (&crtc, surface) in surfaces.iter_mut() {
+                if surface.switched_off {
+                    continue;
+                }
+                recover_output_surface(surface, gles_renderer, "drm_event_error");
+                crtcs.push(crtc);
+            }
+            crtcs
+        };
+
+        if !self.outputs_blanked {
+            for crtc in crtcs_to_repaint {
+                self.schedule_repaint_at(crtc, now + FLIP_WAIT);
+            }
+        }
     }
 
     fn scan_connectors(&mut self) -> anyhow::Result<()> {
@@ -1181,7 +1347,7 @@ impl GlideState {
                 modes: drm_modes,
                 pending_repaint: None,
                 redraw_queued: false,
-                flip_pending: None,
+                flip_stall: FlipStallTracker::default(),
                 switched_off: false,
                 wallpaper_buf: None,
                 wallpaper_blur_buf: None,
@@ -1200,6 +1366,7 @@ impl GlideState {
                 repaint_deadline: None,
                 render_errors: crate::gpu_log::Throttle::default(),
                 flip_stalls: crate::gpu_log::Throttle::default(),
+                recovery_logs: crate::gpu_log::Throttle::default(),
             },
         );
 
@@ -1218,11 +1385,14 @@ impl GlideState {
             let Some(device) = self.backend_data.device.as_mut() else {
                 return;
             };
+            device.drm_errors.clear();
             let Some(surface) = device.surfaces.get_mut(&crtc) else {
                 return;
             };
             let output = surface.output.clone();
-            surface.flip_pending = None;
+            surface.flip_stall.on_vblank();
+            surface.flip_stalls.clear();
+            surface.recovery_logs.clear();
             surface.frame_clock.presented(vblank_instant(metadata.as_ref(), &self.clock));
             surface.origin = Origin::Vblank;
             if let Some(token) = surface.estimated_vblank.take() {
@@ -1419,7 +1589,7 @@ impl GlideState {
                     self.loop_handle.remove(token);
                 }
                 surface.redraw_queued = false;
-                surface.flip_pending = None;
+                surface.flip_stall.reset();
             }
         } else {
             let crtcs: Vec<crtc::Handle> = device.surfaces.keys().copied().collect();
@@ -1524,29 +1694,62 @@ impl GlideState {
         }
 
         let source = std::mem::replace(&mut surface.origin, Origin::Idle);
-        if surface.flip_pending.is_some_and(|since| since.elapsed() < FLIP_WAIT) {
-            if let Some(stats) = surface.stats.as_mut() {
-                stats.flip_blocked();
+        let now = std::time::Instant::now();
+        match surface.flip_stall.check(now) {
+            FlipGuardAction::Ready => {}
+            FlipGuardAction::Wait => {
+                if let Some(stats) = surface.stats.as_mut() {
+                    stats.flip_blocked();
+                }
+                return;
             }
-            return;
-        }
-        if let Some(since) = surface.flip_pending.take() {
-            let waited = since.elapsed();
-            match surface.flip_stalls.hit(std::time::Instant::now()) {
-                crate::gpu_log::Report::First => tracing::warn!(
-                    target: "glide::gpu",
-                    output = %surface.output.name(),
-                    ?waited,
-                    "no page-flip event within the flip wait; rendering anyway"
-                ),
-                crate::gpu_log::Report::Summary(count) => tracing::warn!(
-                    target: "glide::gpu",
-                    output = %surface.output.name(),
-                    count,
-                    ?waited,
-                    "page flips keep timing out"
-                ),
-                crate::gpu_log::Report::Quiet => {}
+            FlipGuardAction::TimedOut { consecutive, waited } => {
+                match surface.flip_stalls.hit(now) {
+                    crate::gpu_log::Report::First => tracing::warn!(
+                        target: "glide::gpu",
+                        output = %surface.output.name(),
+                        consecutive,
+                        ?waited,
+                        "no page-flip event within the flip wait; deferring render"
+                    ),
+                    crate::gpu_log::Report::Summary(count) => tracing::warn!(
+                        target: "glide::gpu",
+                        output = %surface.output.name(),
+                        count,
+                        consecutive,
+                        ?waited,
+                        "page flips keep timing out"
+                    ),
+                    crate::gpu_log::Report::Quiet => {}
+                }
+                if let Some(stats) = surface.stats.as_mut() {
+                    stats.flip_blocked();
+                }
+                self.schedule_repaint_at(crtc, now + FLIP_WAIT);
+                return;
+            }
+            FlipGuardAction::Recover { consecutive, waited } => {
+                match surface.recovery_logs.hit(now) {
+                    crate::gpu_log::Report::First => tracing::error!(
+                        target: "glide::gpu",
+                        output = %surface.output.name(),
+                        ?crtc,
+                        consecutive,
+                        ?waited,
+                        "page-flip stalled past threshold; resetting DRM output state"
+                    ),
+                    crate::gpu_log::Report::Summary(count) => tracing::error!(
+                        target: "glide::gpu",
+                        output = %surface.output.name(),
+                        ?crtc,
+                        count,
+                        consecutive,
+                        ?waited,
+                        "DRM output keeps stalling and resetting"
+                    ),
+                    crate::gpu_log::Report::Quiet => {}
+                }
+                recover_output_surface(surface, gles_renderer, "flip_stall");
             }
         }
         let started = std::time::Instant::now();
@@ -2140,15 +2343,39 @@ impl GlideState {
                 .collect();
             let failed = match surface.drm_output.render_frame(gles_renderer, &copied, MIRROR_CLEAR, frame_flags()) {
                 Ok(result) if !result.is_empty => {
-                    let queued = surface.drm_output.queue_frame(None).is_ok();
-                    if queued {
-                        surface.flip_pending = Some(std::time::Instant::now());
+                    if result.needs_sync()
+                        && let PrimaryPlaneElement::Swapchain(ref element) = result.primary_element
+                    {
+                        wait_for_sync(&element.sync, &target.name());
                     }
-                    !queued
+                    drop(result.primary_element);
+                    match surface.drm_output.queue_frame(None) {
+                        Ok(()) => {
+                            surface.flip_stall.on_queued(std::time::Instant::now());
+                            false
+                        }
+                        Err(err) => {
+                            let exhausted = matches!(err, FrameError::NoFreeSlotsError);
+                            report_frame_error(&mut surface.render_errors, &target.name(), "mirror_queue", &err);
+                            if exhausted {
+                                tracing::warn!(
+                                    target: "glide::gpu",
+                                    output = %target.name(),
+                                    "swapchain exhausted while queueing mirrored frame; resetting DRM output state"
+                                );
+                                recover_output_surface(surface, gles_renderer, "no_free_slots");
+                            }
+                            true
+                        }
+                    }
                 }
                 Ok(_) => false,
                 Err(err) => {
-                    tracing::error!(output = %target.name(), ?err, "failed to render a mirrored frame");
+                    let exhausted = matches!(err, RenderFrameError::PrepareFrame(FrameError::NoFreeSlotsError));
+                    tracing::error!(target: "glide::gpu", output = %target.name(), ?err, "failed to render a mirrored frame");
+                    if exhausted {
+                        recover_output_surface(surface, gles_renderer, "no_free_slots");
+                    }
                     true
                 }
             };
@@ -2449,23 +2676,48 @@ impl GlideState {
         let outcome = match render_result {
             Ok(res) if res.is_empty => FrameOutcome::NoDamage(res.states),
             Ok(res) => {
+                if res.needs_sync()
+                    && let PrimaryPlaneElement::Swapchain(ref element) = res.primary_element
+                {
+                    wait_for_sync(&element.sync, &output.name());
+                }
                 let feedback = take_presentation_feedback(&output, &self.space, &res.states);
+                let states = res.states;
+                drop(res.primary_element);
                 match surface.drm_output.queue_frame(Some(feedback)) {
                     Ok(()) => {
-                        surface.flip_pending = Some(std::time::Instant::now());
+                        surface.flip_stall.on_queued(std::time::Instant::now());
                         if let Some(stats) = surface.stats.as_mut() {
                             stats.queued(source);
                         }
-                        FrameOutcome::Queued(res.states)
+                        FrameOutcome::Queued(states)
                     }
                     Err(err) => {
+                        let exhausted = matches!(err, FrameError::NoFreeSlotsError);
                         report_frame_error(&mut surface.render_errors, &output.name(), "queue", &err);
+                        if exhausted {
+                            tracing::warn!(
+                                target: "glide::gpu",
+                                output = %output.name(),
+                                "swapchain exhausted while queueing frame; resetting DRM output state"
+                            );
+                            recover_output_surface(surface, gles_renderer, "no_free_slots");
+                        }
                         FrameOutcome::Failed
                     }
                 }
             }
             Err(err) => {
+                let exhausted = matches!(err, RenderFrameError::PrepareFrame(FrameError::NoFreeSlotsError));
                 report_frame_error(&mut surface.render_errors, &output.name(), "render", &err);
+                if exhausted {
+                    tracing::warn!(
+                        target: "glide::gpu",
+                        output = %output.name(),
+                        "swapchain exhausted while rendering frame; resetting DRM output state"
+                    );
+                    recover_output_surface(surface, gles_renderer, "no_free_slots");
+                }
                 FrameOutcome::Failed
             }
         };
@@ -2586,11 +2838,12 @@ impl GlideState {
         let Some(device) = self.backend_data.device.as_ref() else {
             return;
         };
+        let now = std::time::Instant::now();
         let pending: Vec<crtc::Handle> = device
             .surfaces
             .iter()
             .filter(|(_, surface)| {
-                let flipping = surface.flip_pending.is_some_and(|since| since.elapsed() < FLIP_WAIT);
+                let flipping = surface.flip_stall.is_blocking_redraw(now);
                 surface.pending_repaint.is_none() && !surface.redraw_queued && !flipping
             })
             .map(|(&crtc, _)| crtc)
@@ -2655,6 +2908,19 @@ impl GlideState {
     }
 
     fn schedule_repaint(&mut self, crtc: crtc::Handle) {
+        let Some(deadline) = self
+            .backend_data
+            .device
+            .as_ref()
+            .and_then(|device| device.surfaces.get(&crtc))
+            .map(|surface| surface.frame_clock.next_vblank(std::time::Instant::now()))
+        else {
+            return;
+        };
+        self.schedule_repaint_at(crtc, deadline);
+    }
+
+    fn schedule_repaint_at(&mut self, crtc: crtc::Handle, deadline: std::time::Instant) {
         let Some(device) = self.backend_data.device.as_mut() else {
             return;
         };
@@ -2665,7 +2931,6 @@ impl GlideState {
             return;
         }
 
-        let deadline = surface.frame_clock.next_vblank(std::time::Instant::now());
         surface.repaint_deadline = Some(deadline);
         let token = self
             .loop_handle
@@ -2839,5 +3104,55 @@ mod tests {
         let _ = resolve_cursor_buffer(&mut cursor, &mut cache, CursorIcon::Default, 1, Duration::ZERO);
         let _ = resolve_cursor_buffer(&mut cursor, &mut cache, CursorIcon::Default, 2, Duration::ZERO);
         assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn flip_stall_tracker_defers_and_escalates_to_recovery_at_threshold() {
+        let t0 = std::time::Instant::now();
+        let mut tracker = FlipStallTracker::default();
+        assert_eq!(tracker.check(t0), FlipGuardAction::Ready);
+        assert!(!tracker.is_blocking_redraw(t0));
+
+        tracker.on_queued(t0);
+        assert!(tracker.is_blocking_redraw(t0 + Duration::from_millis(50)));
+        assert_eq!(tracker.check(t0 + Duration::from_millis(50)), FlipGuardAction::Wait);
+
+        let t1 = t0 + FLIP_WAIT;
+        assert!(!tracker.is_blocking_redraw(t1));
+        assert_eq!(tracker.check(t1), FlipGuardAction::TimedOut { consecutive: 1, waited: FLIP_WAIT });
+        assert!(tracker.is_blocking_redraw(t1 + Duration::from_millis(10)));
+        assert_eq!(tracker.check(t1 + Duration::from_millis(10)), FlipGuardAction::Wait);
+
+        let t2 = t1 + FLIP_WAIT;
+        assert_eq!(tracker.check(t2), FlipGuardAction::TimedOut { consecutive: 2, waited: FLIP_WAIT * 2 });
+
+        let t3 = t2 + FLIP_WAIT;
+        assert_eq!(
+            tracker.check(t3),
+            FlipGuardAction::Recover { consecutive: FLIP_RECOVERY_THRESHOLD, waited: FLIP_WAIT * 3 }
+        );
+
+        tracker.reset();
+        assert_eq!(tracker.check(t3), FlipGuardAction::Ready);
+        assert!(!tracker.is_blocking_redraw(t3));
+    }
+
+    #[test]
+    fn flip_stall_tracker_resets_consecutive_timeouts_on_vblank() {
+        let t0 = std::time::Instant::now();
+        let mut tracker = FlipStallTracker::default();
+        tracker.on_queued(t0);
+        assert_eq!(tracker.check(t0 + FLIP_WAIT), FlipGuardAction::TimedOut { consecutive: 1, waited: FLIP_WAIT });
+
+        tracker.on_vblank();
+        assert_eq!(tracker.check(t0 + FLIP_WAIT), FlipGuardAction::Ready);
+
+        let t_next = t0 + FLIP_WAIT * 2;
+        tracker.on_queued(t_next);
+        assert_eq!(
+            tracker.check(t_next + FLIP_WAIT),
+            FlipGuardAction::TimedOut { consecutive: 1, waited: FLIP_WAIT },
+            "a real vblank must clear prior timeout streak"
+        );
     }
 }

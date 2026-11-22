@@ -1,0 +1,16 @@
+[Unit]
+Description=Glide log collector and crash-bundle daemon
+Documentation=https://github.com/Glide-Desktop/glide
+PartOf=graphical-session.target
+Before=glide.service
+After=graphical-session-pre.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/glide-logd
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=graphical-session.target

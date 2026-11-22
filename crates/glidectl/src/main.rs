@@ -1,3 +1,5 @@
+mod logs;
+
 use std::{
     io::{BufReader, ErrorKind, Write},
     os::unix::net::UnixStream,
@@ -74,6 +76,10 @@ fn run() -> anyhow::Result<i32> {
     if cli.subcommand_args[0] == "tokens" {
         writeln!(out, "{}", tokens(&cli.subcommand_args[1..])?)?;
         return Ok(0);
+    }
+
+    if cli.subcommand_args[0] == "logs" {
+        return logs::run_logs(&mut out, &cli.subcommand_args[1..], cli.json_output);
     }
 
     let request = parse_args(&cli.subcommand_args)?;
@@ -257,6 +263,8 @@ COMMANDS:
     outputs                    List connected outputs with mode, scale and position
     night-light <on|off|status>  Turn night light on or off, or show its state
     tokens [light|dark] [ACCENT]  Print the design tokens as JSON (no session needed)
+    logs <query|sessions|bundles|tail|retention|gpu|stats|mcp>
+                               Inspect Glide logs, crash bundles, retention, or start MCP server
 
 OPTIONS:
     --json                     Output response as raw JSON

@@ -10,7 +10,7 @@ repository.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-x11rb = { version = "0.14", features = ["damage", "xfixes"] }
+x11rb = { version = "0.14", features = ["damage", "shape", "xfixes"] }
 zbus.workspace = true
 
 [dev-dependencies]

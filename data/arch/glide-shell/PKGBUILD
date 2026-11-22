@@ -31,7 +31,7 @@ prepare() {
 build() {
     cd "$pkgbase"
     export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR="$_target"
-    cargo build --frozen --release -p glide-compositor -p glidectl -p glide-xembed -p glide-configd -p glide-portal
+    cargo build --frozen --release -p glide-compositor -p glidectl -p glide-logd -p glide-xembed -p glide-configd -p glide-portal
 }
 
 _exec() {
@@ -44,7 +44,7 @@ package_glide-shell() {
     depends=(
         glide-configd
         xdg-desktop-portal-glide
-        glibc gcc-libs dbus systemd systemd-libs pam
+        glibc gcc-libs sqlite dbus systemd systemd-libs pam
         mesa libglvnd libdrm libinput libxkbcommon libdisplay-info seatd xkeyboard-config
         glib2 dconf gsettings-desktop-schemas
         gstreamer gst-plugins-base gst-plugins-base-libs gst-plugins-good gst-plugins-bad
@@ -70,14 +70,16 @@ package_glide-shell() {
     install=glide-shell.install
 
     cd "$pkgbase"
-    for bin in glide glidectl glide-xembed; do
+    for bin in glide glidectl glide-logd glide-xembed; do
         install -Dm755 "$_target/release/$bin" "$pkgdir/usr/bin/$bin"
     done
     install -Dm755 data/glide-session "$pkgdir/usr/bin/glide-session"
     install -Dm755 data/glide-lock "$pkgdir/usr/bin/glide-lock"
-    install -d "$pkgdir/usr/share/wayland-sessions" "$pkgdir/usr/lib/systemd/user"
+    install -d "$pkgdir/usr/share/wayland-sessions" "$pkgdir/usr/lib/systemd/user" "$pkgdir/usr/lib/tmpfiles.d"
     _exec Exec /usr/bin/glide-session data/glide.desktop "$pkgdir/usr/share/wayland-sessions/glide.desktop"
     _exec ExecStart /usr/bin/glide data/glide.service "$pkgdir/usr/lib/systemd/user/glide.service"
+    _exec ExecStart /usr/bin/glide-logd data/glide-logd.service "$pkgdir/usr/lib/systemd/user/glide-logd.service"
+    install -Dm644 data/glide-logd.tmpfiles "$pkgdir/usr/lib/tmpfiles.d/glide-logd.conf"
     install -Dm644 data/glide-shutdown.target "$pkgdir/usr/lib/systemd/user/glide-shutdown.target"
     install -Dm644 data/pam.d/glide-lock "$pkgdir/etc/pam.d/glide-lock"
     install -Dm644 data/dbus/org.glide.Shell1.xml "$pkgdir/usr/share/dbus-1/interfaces/org.glide.Shell1.xml"

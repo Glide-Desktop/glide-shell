@@ -1,0 +1,3 @@
+# Persistent Glide crash bundles directory (sticky bit keeps each user's bundles separate while easy to copy to USB)
+d /var/log/glide 0755 root root -
+d /var/log/glide/crash-bundles 1777 root root -

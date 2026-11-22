@@ -173,7 +173,8 @@ fn an_embedded_icon_reaches_the_tray_and_takes_its_clicks() {
     assert_eq!(item.props.id, "steam.exe");
     assert_eq!(item.props.title, "Steam");
     let pixmap = item.props.icon_pixmaps.first().expect("a pixmap");
-    assert_eq!((pixmap.width, pixmap.height), (32, 32), "resized to the bridge's icon size");
+    let side = i32::from(glide_xembed::tray::ICON_SIZE);
+    assert_eq!((pixmap.width, pixmap.height), (side, side), "resized to the bridge's icon size");
     assert_eq!(&pixmap.argb[..4], &[0xff, 0xff, 0, 0], "opaque red, straight ARGB");
 
     tray.activate_with_token(&item.key, 10, 10, None);

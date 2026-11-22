@@ -1,12 +1,17 @@
 use std::{
+    fmt,
     fs::File,
     io::Write,
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use tracing_subscriber::{EnvFilter, Layer, filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::{
+    EnvFilter, Layer, filter::LevelFilter, layer::Context, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 const SMITHAY_FILTER: &str = "smithay=info,\
      smithay::wayland::selection=debug,\
@@ -18,6 +23,22 @@ const SMITHAY_FILTER: &str = "smithay=info,\
 const FILTER_VARIABLE: &str = "GLIDE_LOG";
 pub const MAX_LOG_BYTES: u64 = 64 * 1024 * 1024;
 const KEPT_LOGS: u32 = 5;
+
+static SYNC_WRITERS: OnceLock<Mutex<Vec<CappedWriter>>> = OnceLock::new();
+
+fn register_sync_writer(writer: CappedWriter) {
+    let list = SYNC_WRITERS.get_or_init(|| Mutex::new(Vec::new()));
+    list.lock().unwrap_or_else(PoisonError::into_inner).push(writer);
+}
+
+pub fn flush_and_sync_all() {
+    if let Some(list) = SYNC_WRITERS.get() {
+        let writers = list.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        for writer in writers {
+            writer.flush_and_sync();
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -31,6 +52,14 @@ impl Mode {
         match self {
             Self::Session => "glide.log",
             Self::Greeter => "glide-greeter.log",
+        }
+    }
+
+    #[must_use]
+    pub const fn events_file_name(self) -> &'static str {
+        match self {
+            Self::Session => "glide.events.jsonl",
+            Self::Greeter => "glide-greeter.events.jsonl",
         }
     }
 
@@ -72,6 +101,7 @@ pub fn install_panic_hook() {
         let thread = thread.name().unwrap_or("<unnamed>");
         let backtrace = std::backtrace::Backtrace::force_capture();
         tracing::error!("panic in thread '{thread}' at {location}: {message}\n{backtrace}");
+        flush_and_sync_all();
         previous(info);
     }));
 }
@@ -99,16 +129,33 @@ impl Capped {
             let notice =
                 format!("log reached {} MiB; further lines are dropped until the next start\n", self.limit >> 20);
             self.file.write_all(notice.as_bytes())?;
+            let _ = self.file.flush();
+            let _ = self.file.sync_data();
             return Ok(buf.len());
         }
         self.written += len;
         self.file.write_all(buf)?;
         Ok(buf.len())
     }
+
+    fn flush_and_sync(&mut self) {
+        let _ = self.file.flush();
+        let _ = self.file.sync_data();
+    }
 }
 
 #[derive(Debug, Clone)]
 struct CappedWriter(Arc<Mutex<Capped>>);
+
+impl CappedWriter {
+    fn new(file: File, limit: u64) -> Self {
+        Self(Arc::new(Mutex::new(Capped::new(file, limit))))
+    }
+
+    fn flush_and_sync(&self) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).flush_and_sync();
+    }
+}
 
 impl Write for CappedWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -120,13 +167,147 @@ impl Write for CappedWriter {
     }
 }
 
+#[derive(Default)]
+struct JsonFieldVisitor {
+    message: Option<String>,
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Visit for JsonFieldVisitor {
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields.insert(field.name().to_owned(), serde_json::Value::from(value));
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields.insert(field.name().to_owned(), serde_json::Value::from(value));
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields.insert(field.name().to_owned(), serde_json::Value::from(value));
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        if let Some(num) = serde_json::Number::from_f64(value) {
+            self.fields.insert(field.name().to_owned(), serde_json::Value::Number(num));
+        } else {
+            self.fields.insert(field.name().to_owned(), serde_json::Value::String(value.to_string()));
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(value.to_owned());
+        } else {
+            self.fields.insert(field.name().to_owned(), serde_json::Value::String(value.to_owned()));
+        }
+    }
+
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.fields.insert(field.name().to_owned(), serde_json::Value::String(value.to_string()));
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        let rendered = format!("{value:?}");
+        if field.name() == "message" {
+            self.message = Some(rendered);
+        } else {
+            self.fields.insert(field.name().to_owned(), serde_json::Value::String(rendered));
+        }
+    }
+}
+
+struct JsonlLayer {
+    jsonl_writer: CappedWriter,
+    text_writer: CappedWriter,
+}
+
+impl JsonlLayer {
+    const fn new(jsonl_writer: CappedWriter, text_writer: CappedWriter) -> Self {
+        Self { jsonl_writer, text_writer }
+    }
+
+    fn write_event_line(&self, event: &tracing::Event<'_>) {
+        let meta = event.metadata();
+        let mut visitor = JsonFieldVisitor::default();
+        event.record(&mut visitor);
+
+        let ts_ms = now_ms();
+        let ts_iso = format_iso_utc(ts_ms);
+        let thread = std::thread::current().name().map(ToOwned::to_owned);
+        let level = match *meta.level() {
+            tracing::Level::ERROR => "ERROR",
+            tracing::Level::WARN => "WARN",
+            tracing::Level::INFO => "INFO",
+            tracing::Level::DEBUG => "DEBUG",
+            tracing::Level::TRACE => "TRACE",
+        };
+        let message = visitor.message.unwrap_or_default();
+        let record = serde_json::json!({
+            "ts_ms": ts_ms,
+            "ts_iso": ts_iso,
+            "level": level,
+            "target": meta.target(),
+            "thread": thread,
+            "pid": std::process::id(),
+            "message": message,
+            "fields": visitor.fields,
+        });
+
+        if let Ok(mut encoded) = serde_json::to_string(&record) {
+            encoded.push('\n');
+            let mut writer = self.jsonl_writer.clone();
+            let _ = writer.write_all(encoded.as_bytes());
+        }
+
+        if *meta.level() <= tracing::Level::WARN {
+            self.jsonl_writer.flush_and_sync();
+            self.text_writer.flush_and_sync();
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for JsonlLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        self.write_event_line(event);
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+fn format_iso_utc(ts_ms: i64) -> String {
+    let secs = ts_ms.div_euclid(1_000);
+    let millis = ts_ms.rem_euclid(1_000);
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    let hour = sod / 3_600;
+    let minute = (sod % 3_600) / 60;
+    let second = sod % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+}
+
 #[must_use]
 pub fn init(mode: Mode) -> Option<PathBuf> {
     let (spec, source) = filter_spec();
     let file_filter = EnvFilter::try_new(&spec).unwrap_or_else(|_| EnvFilter::new(default_filter()));
+    let jsonl_filter = EnvFilter::try_new(&spec).unwrap_or_else(|_| EnvFilter::new(default_filter()));
     let stderr =
         tracing_subscriber::fmt::layer().with_ansi(false).with_writer(std::io::stderr).with_filter(LevelFilter::WARN);
-    let Some((path, file)) = open_log_file(mode.file_name()) else {
+    let Some((path, file, jsonl_file)) = open_log_files(mode) else {
         let everything = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_thread_names(true)
@@ -136,13 +317,19 @@ pub fn init(mode: Mode) -> Option<PathBuf> {
         log_header(mode, None, &spec, source);
         return None;
     };
-    let writer = CappedWriter(Arc::new(Mutex::new(Capped::new(file, MAX_LOG_BYTES))));
+    let writer = CappedWriter::new(file, MAX_LOG_BYTES);
+    register_sync_writer(writer.clone());
+    let jsonl_layer = jsonl_file.map(|jf| {
+        let jsonl_writer = CappedWriter::new(jf, MAX_LOG_BYTES);
+        register_sync_writer(jsonl_writer.clone());
+        JsonlLayer::new(jsonl_writer, writer.clone()).with_filter(jsonl_filter)
+    });
     let to_file = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_thread_names(true)
         .with_writer(move || writer.clone())
         .with_filter(file_filter);
-    tracing_subscriber::registry().with(to_file).with(stderr).init();
+    tracing_subscriber::registry().with(to_file).with(jsonl_layer).with(stderr).init();
     log_header(mode, Some(&path), &spec, source);
     Some(path)
 }
@@ -186,12 +373,18 @@ fn rotate(dir: &Path, name: &str, kept: u32) {
     let _ = std::fs::rename(dir.join(name), dir.join(format!("{name}.1")));
 }
 
-fn open_log_file(name: &str) -> Option<(PathBuf, File)> {
+fn open_log_files(mode: Mode) -> Option<(PathBuf, File, Option<File>)> {
     let dir = log_dirs().into_iter().find(|dir| usable_dir(dir))?;
+    let name = mode.file_name();
     rotate(&dir, name, KEPT_LOGS);
     let path = dir.join(name);
     let file = File::create(&path).ok()?;
-    Some((path, file))
+
+    let events_name = mode.events_file_name();
+    rotate(&dir, events_name, KEPT_LOGS);
+    let events_file = File::create(dir.join(events_name)).ok();
+
+    Some((path, file, events_file))
 }
 
 fn usable_dir(dir: &Path) -> bool {
@@ -269,5 +462,33 @@ mod tests {
         let last = dirs.last().expect("there is always a fallback");
         assert!(last.starts_with(std::env::temp_dir()));
         assert!(!last.to_string_lossy().contains(&std::process::id().to_string()));
+    }
+
+    #[test]
+    fn jsonl_layer_records_structured_events_and_flushes_on_warn_error() {
+        let dir = std::env::temp_dir().join(format!("glide-log-jsonl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let text_path = dir.join(Mode::Session.file_name());
+        let jsonl_path = dir.join(Mode::Session.events_file_name());
+        let text_writer = CappedWriter::new(File::create(&text_path).expect("text file"), MAX_LOG_BYTES);
+        let jsonl_writer = CappedWriter::new(File::create(&jsonl_path).expect("jsonl file"), MAX_LOG_BYTES);
+        let subscriber = tracing_subscriber::registry().with(JsonlLayer::new(jsonl_writer, text_writer));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "glide::gpu", code = 42_u64, "pageflip stalled");
+            tracing::error!(reason = "drm", "fatal render error");
+        });
+        let content = std::fs::read_to_string(&jsonl_path).expect("read jsonl");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("valid json");
+        assert_eq!(first["level"], "WARN");
+        assert_eq!(first["target"], "glide::gpu");
+        assert_eq!(first["message"], "pageflip stalled");
+        assert_eq!(first["fields"]["code"], 42);
+        let second: serde_json::Value = serde_json::from_str(lines[1]).expect("valid json");
+        assert_eq!(second["level"], "ERROR");
+        assert_eq!(second["fields"]["reason"], "drm");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

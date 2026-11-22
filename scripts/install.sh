@@ -108,18 +108,18 @@ else
     UNITDIR="$PREFIX/lib/systemd/user"
 fi
 
-BINARIES="glide glidectl glide-configd glide-settings glide-files glide-terminal glide-text glide-passwords glide-photos glide-folio glide-clips glide-catalog glide-portal glide-keychain glide-phone glide-welcome glide-xembed facekey"
+BINARIES="glide glidectl glide-logd glide-configd glide-settings glide-files glide-terminal glide-text glide-passwords glide-photos glide-folio glide-clips glide-catalog glide-portal glide-keychain glide-phone glide-welcome glide-xembed facekey"
 FACE_FILES=""
 for model in $FACE_MODELS; do
     FACE_FILES="$FACE_FILES $FACEDIR/$model"
 done
-FILES="$BINDIR/facekey $POLKITDIR/org.glide.facekey.policy$FACE_FILES $FACELIBDIR/libonnxruntime.so$BINDIR/glide $BINDIR/glidectl $BINDIR/glide-configd $BINDIR/glide-settings $BINDIR/glide-files $BINDIR/glide-terminal $BINDIR/glide-text $BINDIR/glide-passwords $BINDIR/glide-photos $BINDIR/glide-folio $BINDIR/glide-clips $BINDIR/glide-catalog $BINDIR/glide-portal $BINDIR/glide-keychain $BINDIR/glide-phone $BINDIR/glide-session $BINDIR/glide-lock
+FILES="$BINDIR/facekey $POLKITDIR/org.glide.facekey.policy$FACE_FILES $FACELIBDIR/libonnxruntime.so$BINDIR/glide $BINDIR/glidectl $BINDIR/glide-logd $BINDIR/glide-configd $BINDIR/glide-settings $BINDIR/glide-files $BINDIR/glide-terminal $BINDIR/glide-text $BINDIR/glide-passwords $BINDIR/glide-photos $BINDIR/glide-folio $BINDIR/glide-clips $BINDIR/glide-catalog $BINDIR/glide-portal $BINDIR/glide-keychain $BINDIR/glide-phone $BINDIR/glide-session $BINDIR/glide-lock
 $BINDIR/glide-welcome $BINDIR/glide-xembed $APPDIR/glide-settings.desktop $APPDIR/glide-files.desktop $APPDIR/glide-terminal.desktop $APPDIR/glide-text.desktop $APPDIR/glide-passwords.desktop $APPDIR/glide-photos.desktop $APPDIR/glide-folio.desktop $APPDIR/glide-clips.desktop $APPDIR/glide-catalog.desktop $APPDIR/glide-phone.desktop $APPDIR/glide-welcome.desktop $AUTOSTARTDIR/glide-phone.desktop $ICONDIR/glide-folio.svg $ICONDIR/glide-phone.svg $ICONDIR/glide-welcome.svg $ICONDIR/org.kde.kdeconnect.svg $SOUNDDIR/terminal-bell.mp3 $DEFAULTSDIR/shell.json $DEFAULTSDIR/passwords.json $DEFAULTSDIR/permissions.json $DEFAULTSDIR/pins.json $DEFAULTSDIR/terminal.json $DEFAULTSDIR/text.json $DEFAULTSDIR/folio.json $SESSIONDIR/glide.desktop $PORTALDIR/glide-portals.conf
 $PORTALDIR/portals/glide.portal $DBUSDIR/org.freedesktop.impl.portal.desktop.glide.service
 $DBUSDIR/org.glide.Files.service $DBUSDIR/org.glide.Terminal.service $DBUSDIR/org.glide.Phone.service $DBUSDIR/org.glide.Config.service
 $INTERFACEDIR/org.glide.Shell1.xml $INTERFACEDIR/org.glide.Config1.xml
 $SEARCHDIR/glide-files-search-provider.ini $SEARCHDIR/glide-terminal-search-provider.ini
-$UNITDIR/glide.service $UNITDIR/glide-shutdown.target $PAMDIR/glide-lock $PAM_MODULEDIR/$PAM_MODULE"
+$UNITDIR/glide.service $UNITDIR/glide-logd.service $UNITDIR/glide-shutdown.target /usr/lib/tmpfiles.d/glide-logd.conf $PAMDIR/glide-lock $PAM_MODULEDIR/$PAM_MODULE"
 
 pam_lines() {
     action="$1"
@@ -257,12 +257,23 @@ if [ "$INSTALL_PAM" -eq 1 ]; then
     pam_lines add
 fi
 
-install -d "$DESTDIR$SESSIONDIR" "$DESTDIR$UNITDIR"
+install -d "$DESTDIR$SESSIONDIR" "$DESTDIR$UNITDIR" "$DESTDIR/usr/lib/tmpfiles.d"
 sed "s|^Exec=.*|Exec=$BINDIR/glide-session|" "$ROOT/data/glide.desktop" > "$DESTDIR$SESSIONDIR/glide.desktop"
 chmod 644 "$DESTDIR$SESSIONDIR/glide.desktop"
 sed "s|^ExecStart=.*|ExecStart=$BINDIR/glide|" "$ROOT/data/glide.service" > "$DESTDIR$UNITDIR/glide.service"
 chmod 644 "$DESTDIR$UNITDIR/glide.service"
+sed "s|^ExecStart=.*|ExecStart=$BINDIR/glide-logd|" "$ROOT/data/glide-logd.service" > "$DESTDIR$UNITDIR/glide-logd.service"
+chmod 644 "$DESTDIR$UNITDIR/glide-logd.service"
+install -Dm644 "$ROOT/data/glide-logd.tmpfiles" "$DESTDIR/usr/lib/tmpfiles.d/glide-logd.conf"
 install -Dm644 "$ROOT/data/glide-shutdown.target" "$DESTDIR$UNITDIR/glide-shutdown.target"
+if [ -z "$DESTDIR" ]; then
+    if command -v systemd-tmpfiles >/dev/null 2>&1; then
+        systemd-tmpfiles --create /usr/lib/tmpfiles.d/glide-logd.conf 2>/dev/null || true
+    else
+        install -d -m 755 /var/log/glide
+        install -d -m 1777 /var/log/glide/crash-bundles
+    fi
+fi
 
 if [ "$INSTALL_DM" -eq 1 ]; then
     GREETD_DIR=/etc/greetd

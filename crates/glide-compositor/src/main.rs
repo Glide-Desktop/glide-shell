@@ -82,7 +82,7 @@ mod xwayland;
 use smithay::{
     backend::session::libseat::LibSeatSession,
     reexports::{
-        calloop::{EventLoop, LoopHandle, channel},
+        calloop::{EventLoop, LoopHandle, channel, ping},
         wayland_server::Display,
     },
 };
@@ -205,77 +205,18 @@ fn run() -> anyhow::Result<()> {
         init_session_services(&mut event_loop, &mut state, &config)?;
     }
 
+    let watchdog = MainLoopWatchdog::start(&event_loop.handle());
+    let heartbeat = watchdog.as_ref().map(MainLoopWatchdog::heartbeat);
+
     event_loop.run(None, &mut state, move |state| {
-        state.space.refresh();
-        state.popups.cleanup();
-
-        let login_animating = state.tick_login();
-        let overview_animating = state.tick_overview();
-        let hover_animating = state.any_button_hover_animating();
-        let open_animating = state.any_window_open_animating();
-        let fade_animating = state.any_surface_fading_in() || state.wallpaper_fading();
-        let geometry_animating = state.any_window_geometry_animating();
-        let snapshots_animating = state.snapshots.tick();
-        let dock_autohide = state.update_dock_autohide();
-        let dock_preview = state.sync_dock_preview();
-        let dock_animating = dock_autohide || dock_preview || state.dock.is_animating();
-        let launcher_animating = state.tick_launcher();
-        let switcher_animating = state.tick_switcher();
-        let power_dialog_animating = state.tick_power_dialog();
-        let cursor_animating = state.is_cursor_animating();
-        let toasts_animating = state.notifications.settle();
-        let snap_animating = state.settle_snap_preview();
-        let topbar_animating = state.topbar.is_animating();
-        let flash_animating = state.screenshot_flash.tick(std::time::Instant::now());
-        let osd_animating = state.session.osd.tick(std::time::Instant::now());
-        let find_cursor_animating = state.session.find_cursor.tick(std::time::Instant::now());
-        let wheel_animating = state.smooth_wheel_pending();
-        let shot_animating = state.tick_shot();
-        let shot_preview_animating = state.tick_shot_preview();
-        let polkit_animating = state.tick_polkit();
-        let keychain_animating = state.tick_keychain_prompt();
-        let night_light_animating = state.tick_night_light_fade();
-        let blank_animating = state.tick_blank_fade();
-
-        if toasts_animating
-            || night_light_animating
-            || blank_animating
-            || polkit_animating
-            || keychain_animating
-            || shot_animating
-            || shot_preview_animating
-            || osd_animating
-            || wheel_animating
-            || snap_animating
-            || topbar_animating
-            || overview_animating
-            || hover_animating
-            || open_animating
-            || fade_animating
-            || geometry_animating
-            || snapshots_animating
-            || dock_animating
-            || launcher_animating
-            || switcher_animating
-            || power_dialog_animating
-            || cursor_animating
-            || find_cursor_animating
-            || flash_animating
-            || login_animating
-        {
-            state.queue_animation_redraw();
+        if let Some(heartbeat) = heartbeat.as_ref() {
+            heartbeat.beat();
         }
-        state.sync_wake_timer();
-
-        state.tick_idle();
-        state.tick_session_end();
-        state.tick_local_notifications();
-        state.sync_session_hints();
-        state.sync_shell_bus();
-        let _ = state.display_handle.flush_clients();
+        tick_event_loop(state);
     })?;
 
     tracing::info!("shutting down");
+    drop(watchdog);
     if login_session {
         handoff::paint_console();
     }
@@ -283,6 +224,244 @@ fn run() -> anyhow::Result<()> {
     drop(ipc_server);
 
     Ok(())
+}
+
+fn tick_event_loop(state: &mut GlideState) {
+    state.space.refresh();
+    state.popups.cleanup();
+
+    let login_animating = state.tick_login();
+    let overview_animating = state.tick_overview();
+    let hover_animating = state.any_button_hover_animating();
+    let open_animating = state.any_window_open_animating();
+    let fade_animating = state.any_surface_fading_in() || state.wallpaper_fading();
+    let geometry_animating = state.any_window_geometry_animating();
+    let snapshots_animating = state.snapshots.tick();
+    let dock_autohide = state.update_dock_autohide();
+    let dock_preview = state.sync_dock_preview();
+    let dock_animating = dock_autohide || dock_preview || state.dock.is_animating();
+    let launcher_animating = state.tick_launcher();
+    let switcher_animating = state.tick_switcher();
+    let power_dialog_animating = state.tick_power_dialog();
+    let cursor_animating = state.is_cursor_animating();
+    let toasts_animating = state.notifications.settle();
+    let snap_animating = state.settle_snap_preview();
+    let topbar_animating = state.topbar.is_animating();
+    let flash_animating = state.screenshot_flash.tick(std::time::Instant::now());
+    let osd_animating = state.session.osd.tick(std::time::Instant::now());
+    let find_cursor_animating = state.session.find_cursor.tick(std::time::Instant::now());
+    let wheel_animating = state.smooth_wheel_pending();
+    let shot_animating = state.tick_shot();
+    let shot_preview_animating = state.tick_shot_preview();
+    let polkit_animating = state.tick_polkit();
+    let keychain_animating = state.tick_keychain_prompt();
+    let night_light_animating = state.tick_night_light_fade();
+    let blank_animating = state.tick_blank_fade();
+
+    if toasts_animating
+        || night_light_animating
+        || blank_animating
+        || polkit_animating
+        || keychain_animating
+        || shot_animating
+        || shot_preview_animating
+        || osd_animating
+        || wheel_animating
+        || snap_animating
+        || topbar_animating
+        || overview_animating
+        || hover_animating
+        || open_animating
+        || fade_animating
+        || geometry_animating
+        || snapshots_animating
+        || dock_animating
+        || launcher_animating
+        || switcher_animating
+        || power_dialog_animating
+        || cursor_animating
+        || find_cursor_animating
+        || flash_animating
+        || login_animating
+    {
+        state.queue_animation_redraw();
+    }
+    state.sync_wake_timer();
+
+    state.tick_idle();
+    state.tick_session_end();
+    state.tick_local_notifications();
+    state.sync_session_hints();
+    state.sync_shell_bus();
+    let _ = state.display_handle.flush_clients();
+}
+
+const WATCHDOG_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const WATCHDOG_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const WATCHDOG_STALL_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
+const WATCHDOG_REPEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[derive(Clone)]
+struct MainLoopHeartbeat {
+    epoch: std::time::Instant,
+    last_beat_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    beats: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl MainLoopHeartbeat {
+    fn new() -> Self {
+        Self {
+            epoch: std::time::Instant::now(),
+            last_beat_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            beats: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    fn beat(&self) {
+        let elapsed = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_beat_ms.store(elapsed, std::sync::atomic::Ordering::Release);
+        self.beats.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn stalled_for(&self) -> std::time::Duration {
+        let now_ms = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let last_ms = self.last_beat_ms.load(std::sync::atomic::Ordering::Acquire);
+        std::time::Duration::from_millis(now_ms.saturating_sub(last_ms))
+    }
+
+    fn count(&self) -> u64 {
+        self.beats.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WatchdogConfig {
+    check_interval: std::time::Duration,
+    ping_interval: std::time::Duration,
+    stall_threshold: std::time::Duration,
+    repeat_interval: std::time::Duration,
+}
+
+struct MainLoopWatchdog {
+    heartbeat: MainLoopHeartbeat,
+    stop: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MainLoopWatchdog {
+    fn start(loop_handle: &LoopHandle<'static, GlideState>) -> Option<Self> {
+        let (ping_sender, ping_source) = match ping::make_ping() {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(target: "glide::watchdog", ?err, "failed to create main-loop watchdog ping");
+                return None;
+            }
+        };
+        let heartbeat = MainLoopHeartbeat::new();
+        let beat_for_ping = heartbeat.clone();
+        if let Err(err) = loop_handle.insert_source(ping_source, move |(), (), _state| {
+            beat_for_ping.beat();
+        }) {
+            tracing::warn!(target: "glide::watchdog", ?err, "failed to register main-loop watchdog ping");
+            return None;
+        }
+
+        let config = WatchdogConfig {
+            check_interval: WATCHDOG_CHECK_INTERVAL,
+            ping_interval: WATCHDOG_PING_INTERVAL,
+            stall_threshold: WATCHDOG_STALL_THRESHOLD,
+            repeat_interval: WATCHDOG_REPEAT_INTERVAL,
+        };
+        Self::spawn_with(
+            heartbeat,
+            config,
+            move || ping_sender.ping(),
+            |stalled, beats| {
+                tracing::error!(
+                    target: "glide::watchdog",
+                    stalled_ms = u64::try_from(stalled.as_millis()).unwrap_or(u64::MAX),
+                    beats,
+                    "compositor main loop stalled"
+                );
+            },
+            |stalled, beats| {
+                tracing::warn!(
+                    target: "glide::watchdog",
+                    stalled_ms = u64::try_from(stalled.as_millis()).unwrap_or(u64::MAX),
+                    beats,
+                    "compositor main loop recovered from stall"
+                );
+            },
+        )
+    }
+
+    fn spawn_with(
+        heartbeat: MainLoopHeartbeat, config: WatchdogConfig, mut on_ping: impl FnMut() + Send + 'static,
+        mut on_stall: impl FnMut(std::time::Duration, u64) + Send + 'static,
+        mut on_recover: impl FnMut(std::time::Duration, u64) + Send + 'static,
+    ) -> Option<Self> {
+        let stop = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let thread_stop = std::sync::Arc::clone(&stop);
+        let thread_heartbeat = heartbeat.clone();
+
+        let thread = std::thread::Builder::new()
+            .name("glide-watchdog".into())
+            .spawn(move || {
+                let (lock, cvar) = &*thread_stop;
+                let mut stall_started: Option<std::time::Instant> = None;
+                let mut last_report: Option<std::time::Instant> = None;
+
+                let mut stopped = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*stopped {
+                    let (guard, _) =
+                        cvar.wait_timeout(stopped, config.check_interval).unwrap_or_else(std::sync::PoisonError::into_inner);
+                    stopped = guard;
+                    if *stopped {
+                        break;
+                    }
+                    drop(stopped);
+
+                    let now = std::time::Instant::now();
+                    let stalled = thread_heartbeat.stalled_for();
+                    if stalled >= config.ping_interval {
+                        on_ping();
+                    }
+                    if stalled > config.stall_threshold {
+                        let _ = stall_started.get_or_insert_with(|| now.checked_sub(stalled).unwrap_or(now));
+                        if last_report.is_none_or(|at| now.saturating_duration_since(at) >= config.repeat_interval) {
+                            on_stall(stalled, thread_heartbeat.count());
+                            last_report = Some(now);
+                        }
+                    } else if let Some(started) = stall_started.take() {
+                        last_report = None;
+                        on_recover(now.saturating_duration_since(started), thread_heartbeat.count());
+                    }
+
+                    stopped = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            })
+            .map_err(|err| {
+                tracing::warn!(target: "glide::watchdog", ?err, "failed to spawn main-loop watchdog thread");
+            })
+            .ok()?;
+
+        Some(Self { heartbeat, stop, thread: Some(thread) })
+    }
+
+    fn heartbeat(&self) -> MainLoopHeartbeat {
+        self.heartbeat.clone()
+    }
+}
+
+impl Drop for MainLoopWatchdog {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.stop;
+        *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        cvar.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 fn init_session_services(
@@ -1018,5 +1197,78 @@ mod tests {
         assert!(marker_a.exists(), "first autostart command did not run");
         assert!(marker_b.exists(), "second autostart command did not run");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn watchdog_reports_a_stalled_loop_and_its_recovery() {
+        let heartbeat = MainLoopHeartbeat::new();
+        heartbeat.beat();
+        let stalls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let recoveries = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let pings = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let stalls_cb = std::sync::Arc::clone(&stalls);
+        let recoveries_cb = std::sync::Arc::clone(&recoveries);
+        let pings_cb = std::sync::Arc::clone(&pings);
+
+        let watchdog = MainLoopWatchdog::spawn_with(
+            heartbeat.clone(),
+            WatchdogConfig {
+                check_interval: std::time::Duration::from_millis(15),
+                ping_interval: std::time::Duration::from_millis(20),
+                stall_threshold: std::time::Duration::from_millis(45),
+                repeat_interval: std::time::Duration::from_secs(5),
+            },
+            move || {
+                pings_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            },
+            move |_stalled, _beats| {
+                stalls_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            },
+            move |_stalled, _beats| {
+                recoveries_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            },
+        )
+        .expect("watchdog thread spawns");
+
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert!(pings.load(std::sync::atomic::Ordering::Relaxed) >= 1, "watchdog probes an idle/stalled loop");
+        assert_eq!(stalls.load(std::sync::atomic::Ordering::Relaxed), 1, "stall is reported once within repeat window");
+        assert_eq!(recoveries.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        heartbeat.beat();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(recoveries.load(std::sync::atomic::Ordering::Relaxed), 1, "recovery is reported once beat resumes");
+
+        drop(watchdog);
+    }
+
+    #[test]
+    fn watchdog_stays_silent_while_pings_keep_beating() {
+        let heartbeat = MainLoopHeartbeat::new();
+        heartbeat.beat();
+        let stalls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let stalls_cb = std::sync::Arc::clone(&stalls);
+        let beat_on_ping = heartbeat.clone();
+
+        let watchdog = MainLoopWatchdog::spawn_with(
+            heartbeat,
+            WatchdogConfig {
+                check_interval: std::time::Duration::from_millis(10),
+                ping_interval: std::time::Duration::from_millis(15),
+                stall_threshold: std::time::Duration::from_millis(60),
+                repeat_interval: std::time::Duration::from_secs(5),
+            },
+            move || beat_on_ping.beat(),
+            move |_stalled, _beats| {
+                stalls_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            },
+            |_stalled, _beats| {},
+        )
+        .expect("watchdog thread spawns");
+
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert_eq!(stalls.load(std::sync::atomic::Ordering::Relaxed), 0, "responsive loop never trips the watchdog");
+        drop(watchdog);
     }
 }

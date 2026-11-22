@@ -1,7 +1,18 @@
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     reexports::{
-        calloop::{EventSource, Interest},
+        calloop::{
+            EventSource, Interest,
+            timer::{TimeoutAction, Timer},
+        },
         wayland_server::{
             Client, Resource,
             protocol::{wl_buffer, wl_surface::WlSurface},
@@ -23,6 +34,8 @@ use smithay::{
 use crate::{GlideState, grabs::resize_grab, state::ClientState};
 
 use super::xdg_shell;
+
+const BUFFER_WAIT_WARN: Duration = Duration::from_secs(2);
 
 impl CompositorHandler for GlideState {
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -125,7 +138,7 @@ impl GlideState {
         if let Some(acquire) = acquire {
             match acquire.generate_blocker() {
                 Ok((blocker, source)) => {
-                    if self.unblock_when(source, client).is_ok() {
+                    if self.unblock_when(source, client, surface, "drm_syncobj").is_ok() {
                         add_blocker(surface, blocker);
                     }
                     return;
@@ -135,7 +148,7 @@ impl GlideState {
         }
         match dmabuf.generate_blocker(Interest::READ) {
             Ok((blocker, source)) => {
-                if self.unblock_when(source, client).is_ok() {
+                if self.unblock_when(source, client, surface, "dmabuf").is_ok() {
                     add_blocker(surface, blocker);
                 }
             }
@@ -143,18 +156,67 @@ impl GlideState {
         }
     }
 
-    fn unblock_when<S>(&self, source: S, client: Client) -> Result<(), ()>
+    fn unblock_when<S>(&self, source: S, client: Client, surface: &WlSurface, kind: &'static str) -> Result<(), ()>
     where
         S: EventSource<Event = (), Ret = Result<(), std::io::Error>> + 'static,
     {
-        self.loop_handle
-            .insert_source(source, move |(), _, state| {
-                let display = state.display_handle.clone();
-                state.client_compositor_state(&client).blocker_cleared(state, &display);
-                Ok(())
+        let started = Instant::now();
+        let resolved = Arc::new(AtomicBool::new(false));
+        let surface_id = surface.id();
+
+        let timer_resolved = Arc::clone(&resolved);
+        let warn_client = client.clone();
+        let warn_surface = surface.clone();
+        let mut timer_token = self
+            .loop_handle
+            .insert_source(Timer::from_duration(BUFFER_WAIT_WARN), move |_, (), _state| {
+                if !timer_resolved.load(Ordering::Acquire) {
+                    tracing::warn!(
+                        target: "glide::gpu",
+                        kind,
+                        client = ?warn_client.id(),
+                        surface = ?warn_surface.id(),
+                        surface_alive = warn_surface.is_alive(),
+                        waited = ?started.elapsed(),
+                        "client buffer fence blocker stalled"
+                    );
+                }
+                TimeoutAction::Drop
             })
-            .map(drop)
-            .map_err(|err| tracing::warn!(target: "glide::gpu", ?err, "cannot wait for a client buffer"))
+            .ok();
+
+        let cleanup_token = timer_token;
+        let result = self.loop_handle.insert_source(source, move |(), _, state| {
+            resolved.store(true, Ordering::Release);
+            if let Some(token) = timer_token.take() {
+                state.loop_handle.remove(token);
+            }
+            let waited = started.elapsed();
+            if waited >= BUFFER_WAIT_WARN {
+                tracing::info!(
+                    target: "glide::gpu",
+                    kind,
+                    client = ?client.id(),
+                    surface = ?surface_id,
+                    ?waited,
+                    "stalled client buffer fence blocker cleared"
+                );
+            }
+            let display = state.display_handle.clone();
+            state.client_compositor_state(&client).blocker_cleared(state, &display);
+            Ok(())
+        });
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                if let Some(token) = cleanup_token {
+                    self.loop_handle.remove(token);
+                }
+                tracing::warn!(target: "glide::gpu", kind, ?err, "cannot wait for a client buffer");
+                Err(())
+            }
+        }
     }
 
     fn mapped_location(&self, surface: &WlSurface) -> Option<Point<i32, Logical>> {

@@ -3,7 +3,7 @@ Description=Glide Wayland compositor
 Documentation=https://github.com/Glide-Desktop/glide
 BindsTo=graphical-session.target
 Before=graphical-session.target
-Wants=graphical-session-pre.target
+Wants=graphical-session-pre.target glide-logd.service
 After=graphical-session-pre.target
 
 [Service]

@@ -49,7 +49,7 @@ impl Click {
 }
 
 pub trait Clicker: Send + Sync {
-    fn click(&self, window: u32, click: Click);
+    fn click(&self, window: u32, click: Click, at: Option<(i32, i32)>);
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -79,8 +79,8 @@ impl Item {
         self.look.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
-    fn press(&self, click: Click) {
-        self.clicker.click(self.window, click);
+    fn press(&self, click: Click, at: Option<(i32, i32)>) {
+        self.clicker.click(self.window, click, at);
     }
 }
 
@@ -135,22 +135,22 @@ impl Item {
 
     fn activate(&self, x: i32, y: i32) {
         tracing::debug!(window = self.window, x, y, "tray icon activated");
-        self.press(Click::Primary);
+        self.press(Click::Primary, Some((x, y)));
     }
 
     fn secondary_activate(&self, x: i32, y: i32) {
         tracing::debug!(window = self.window, x, y, "tray icon middle-clicked");
-        self.press(Click::Middle);
+        self.press(Click::Middle, Some((x, y)));
     }
 
     fn context_menu(&self, x: i32, y: i32) {
         tracing::debug!(window = self.window, x, y, "tray icon menu asked for");
-        self.press(Click::Secondary);
+        self.press(Click::Secondary, Some((x, y)));
     }
 
     fn scroll(&self, delta: i32, orientation: String) {
         if let Some(click) = Click::scroll(delta, &orientation) {
-            self.press(click);
+            self.press(click, None);
         }
     }
 
@@ -238,5 +238,35 @@ mod tests {
         assert!(Look::default().pixmaps().is_empty());
         let look = Look { icon: Icon { width: 1, height: 1, argb: vec![255, 1, 2, 3] }, ..Look::default() };
         assert_eq!(look.pixmaps(), vec![(1, 1, vec![255, 1, 2, 3])]);
+    }
+
+    #[test]
+    fn clicks_forward_requested_coordinates_to_the_clicker() {
+        type RecordedClick = (u32, Click, Option<(i32, i32)>);
+        struct Recorder(Mutex<Vec<RecordedClick>>);
+        impl Clicker for Recorder {
+            fn click(&self, window: u32, click: Click, at: Option<(i32, i32)>) {
+                self.0.lock().expect("lock").push((window, click, at));
+            }
+        }
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let item = Item {
+            window: 7,
+            look: Arc::new(Mutex::new(Look::default())),
+            clicker: Arc::clone(&recorder) as Arc<dyn Clicker>,
+        };
+        item.activate(120, 24);
+        item.secondary_activate(125, 24);
+        item.context_menu(130, 24);
+        item.scroll(120, String::from("vertical"));
+        assert_eq!(
+            *recorder.0.lock().expect("lock"),
+            vec![
+                (7, Click::Primary, Some((120, 24))),
+                (7, Click::Middle, Some((125, 24))),
+                (7, Click::Secondary, Some((130, 24))),
+                (7, Click::ScrollDown, None),
+            ]
+        );
     }
 }
