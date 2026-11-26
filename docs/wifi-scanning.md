@@ -157,6 +157,12 @@ drawn only for rows wholly on screen; the 3 px thumb is its own cached
 element. Opening a password or details drawer scrolls it into view. The scan
 line scrolls away with the rows. Lists are capped at 30 rows.
 
-Not done: an edge fade (rows are cut hard at the body's edges), hover follows
-the pointer only after it moves again, and keyboard focus cannot reach rows
-below the fold. The composited scroll has not been seen on hardware.
+A scroll clears a row's hover (it comes back with the next pointer motion), so
+the highlight does not ride away with the rows.
+
+Not done: an edge fade (rows are cut hard at the body's edges), coasting after
+the fingers lift, and keyboard focus cannot reach rows below the fold. The
+"updated N s ago" tick re-rasters the page once a second, now up to its full
+content height (30 rows at most). The composited scroll has not been seen on
+hardware; `push_placed_from` was checked by reading only (it crops the source
+from `origin` and the element size, with nothing tied to the popup height).

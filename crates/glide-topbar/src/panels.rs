@@ -1086,6 +1086,10 @@ impl Topbar {
         if (panel.scroll.target() - before).abs() < f64::EPSILON {
             return false;
         }
+        let in_body = |slot: Slot| !matches!(slot, Slot::QsBack | Slot::QsDetailToggle | Slot::QsDetailSettings);
+        if self.hovered.is_some_and(in_body) {
+            self.set_hover(None);
+        }
         self.touch();
         true
     }
@@ -3017,6 +3021,9 @@ mod tests {
         let lower = page.thumb(bar.qs_panel.drawn_offset(), super::super::QS_WIDTH).expect("scrolled");
         assert!(lower.loc.y > top.loc.y, "the thumb moves down with the list");
         assert!(!bar.scroll_detail_by(ScrollDelta::Stop), "lifting the fingers changes nothing");
+        bar.hovered = Some(Slot::QsDetailRow(3));
+        assert!(bar.scroll_detail_by(ScrollDelta::Continuous(20.0)));
+        assert_eq!(bar.hovered, None, "a row's hover does not ride away with the scroll");
         assert!(bar.scroll_detail_by(ScrollDelta::Wheel(12_000.0)));
         assert_eq!(bar.qs_panel.target_offset(), page.overflow, "a wheel run stops at the end");
         let bottom = page.thumb(page.overflow, super::super::QS_WIDTH).expect("at the end");
