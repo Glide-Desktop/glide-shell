@@ -6986,6 +6986,12 @@ mod tests {
                 bar.toggle_info("Home");
             }
             "-password" => bar.toggle_prompt("Cafe Mriia"),
+            "-battery" => {
+                bar.apply_net_event(crate::qs_net::NetEvent::WifiScanning(true));
+                bar.apply_net_event(crate::qs_net::NetEvent::WifiScanning(false));
+                bar.set_scan_on_battery(true);
+                bar.tick_scan_age(glide_ui::clock::now() + Duration::from_secs(12));
+            }
             _ => {}
         }
     }
@@ -7109,6 +7115,7 @@ mod tests {
                     (Detail::Wifi, None, ""),
                     (Detail::Wifi, None, "-info"),
                     (Detail::Wifi, None, "-password"),
+                    (Detail::Wifi, None, "-battery"),
                     (Detail::Bluetooth, None, ""),
                     (Detail::Vpn, None, ""),
                 ] {

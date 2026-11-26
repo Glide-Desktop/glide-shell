@@ -1,6 +1,6 @@
 # Wi-Fi scanning, switching between known networks, captive portals
 
-Plan of 2026-11-26. Nothing here is built yet.
+Plan of 2026-11-26. Step 1 is built; the rest is not.
 
 ## Findings
 
@@ -21,27 +21,31 @@ Plan of 2026-11-26. Nothing here is built yet.
   It was switched on by hand on the user's machine.
 - The QS Wi-Fi list does scroll, but only by wheel notches (one row each), with
   no scrollbar or hint that more rows exist.
+- Under iwd, `LastScan` jumps to the request time the moment a scan is asked
+  for, while access points keep arriving for up to 5 s after it. It says
+  nothing about a finished scan, so scans run on a fixed cadence.
 
-## 1. Stop blocking on scans (first step, small)
+## 1. Stop blocking on scans — done in the shell
 
-- `qs_net`: `RescanWifi` becomes `nmcli dev wifi rescan` (fire and forget)
-  followed by `list --rescan no`; while the page is open the cached list is
-  re-read every second.
-- glide-settings: the same in `services/network.rs`.
+- `qs_net`: opening the page or the scan-now button (`RescanWifi`) asks
+  NetworkManager for a scan without waiting (`nmcli dev wifi rescan`) and shows
+  the spinner for `WIFI_SCAN_SETTLE` (4 s); while the page stays open a quiet
+  `RefreshWifi` repeats that every 4 s (8 s on battery) without the spinner,
+  and the cached list (`list --rescan no`) is read every second. Saved
+  networks are cached between reads, rows sort by bars rather than raw signal,
+  and no scan is asked for while a connection is being made.
+- glide-settings: the same in `services/network.rs` — not done yet.
 
 ## 2. One scanner in the compositor
 
-A worker in the compositor owns background scanning. Better done over
-NetworkManager's D-Bus (`Device.Wireless.RequestScan`, `LastScan`,
-`AccessPointAdded` / `AccessPointRemoved`) than nmcli: the signals update the
-list the moment iwd reports, with no polling.
+A worker in the compositor owns background scanning, through the same
+`nmcli dev wifi rescan` requests on a fixed cadence.
 
 Modes:
 
-- **Fast**, while the QS Network page or Settings › Network is open: ask for
-  the next scan as soon as `LastScan` changes (one cycle is 3–5 s, the
-  hardware floor). The current connection lags a little; acceptable for as
-  long as the page is open.
+- **Fast**, while the QS Network page or Settings › Network is open: a scan
+  every 4 s (one cycle is 3–5 s, the hardware floor). The current connection
+  lags a little; acceptable for as long as the page is open.
 - **Disconnected**: every 15–20 s; every 3–5 s for the first minute after a
   disconnect, resume or lid open. Nothing to harm without a connection.
 - **Connected**: every 15–20 s, skipped while the link carries traffic (rx + tx
@@ -51,22 +55,21 @@ Modes:
   iwd nor NetworkManager can scan a subset of channels. This mode exists for §3.
 - **Off**: radio off, airplane mode.
 
-Settings drives its own fast scans through NetworkManager; the compositor's
-background timer restarts on every `LastScan` change, so the two never stack.
+Settings drives its own fast scans through NetworkManager.
 
 On battery (a discharging system battery, as the idle policy reads it) every
 interval grows, starting points to tune:
 
 | Mode | Mains | Battery |
 |---|---|---|
-| Fast (page open) | back to back | 5 s pause between scans |
+| Fast (page open) | 4 s | 8 s |
 | Disconnected, first minute | 3–5 s | 10 s |
 | Disconnected | 15–20 s | 60 s |
 | Connected | 15–20 s | 60 s |
 
 The user is told: on battery the scan line of the QS Network page and of
-Settings › Network reads "On battery · searching less often" next to
-"updated N s ago", and the scan-now button runs one scan at once whatever the
+Settings › Network reads "Fewer scans on battery · N s ago" ("Від батареї
+пошук рідше · N с тому"), and the scan-now button runs one scan at once whatever the
 mode. Plugging in or unplugging switches the intervals without waiting for the
 current one to end.
 

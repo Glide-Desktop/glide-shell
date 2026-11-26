@@ -413,8 +413,9 @@ impl MainLoopWatchdog {
 
                 let mut stopped = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 while !*stopped {
-                    let (guard, _) =
-                        cvar.wait_timeout(stopped, config.check_interval).unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let (guard, _) = cvar
+                        .wait_timeout(stopped, config.check_interval)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     stopped = guard;
                     if *stopped {
                         break;
@@ -787,9 +788,9 @@ fn init_quick_settings_network(event_loop: &mut EventLoop<'static, GlideState>) 
     watch(event_loop, receiver, "the network panel channel", GlideState::handle_net_event);
     GlideState::refresh_quick_settings_lists();
 
-    let rescan = event_loop.handle().insert_source(Timer::from_duration(qs_net::RESCAN_INTERVAL), |_, (), state| {
-        state.rescan_quick_settings_panel();
-        TimeoutAction::ToDuration(qs_net::RESCAN_INTERVAL)
+    let rescan = event_loop.handle().insert_source(Timer::from_duration(qs_net::PAGE_TICK), |_, (), state| {
+        state.tick_quick_settings_panel();
+        TimeoutAction::ToDuration(qs_net::PAGE_TICK)
     });
     if let Err(err) = rescan {
         tracing::error!("failed to start the network panel rescan timer: {err}");

@@ -430,6 +430,7 @@ pub struct SessionServices {
     pub end: crate::session_end::SessionEnd,
     pub battery_alert: crate::battery_alert::BatteryAlert,
     pub battery_saver: crate::battery_alert::Saver,
+    pub qs_scanned: Option<std::time::Instant>,
     pub prompts: crate::agent_prompt::Prompts,
     pub bell: Option<std::time::Instant>,
     pub volumes: crate::removable::Toasts,
@@ -1715,6 +1716,9 @@ impl GlideState {
             keyboard: status.keyboard_brightness,
         };
         if self.session.osd.status(levels, std::time::Instant::now()) {
+            self.queue_redraw();
+        }
+        if self.topbar.set_scan_on_battery(discharging) {
             self.queue_redraw();
         }
         let alert = self.session.battery_alert.update(status.battery_pct, discharging, self.topbar.battery_low_pct());

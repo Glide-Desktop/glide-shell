@@ -404,6 +404,7 @@ struct Scan {
     running: bool,
     finished: Option<std::time::Instant>,
     age: Option<u64>,
+    on_battery: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1258,6 +1259,21 @@ impl Topbar {
         }
     }
 
+    #[must_use]
+    pub const fn scans_on_battery(&self) -> bool {
+        self.qs_panel.scan.on_battery
+    }
+
+    pub fn set_scan_on_battery(&mut self, on_battery: bool) -> bool {
+        if self.qs_panel.scan.on_battery == on_battery {
+            return false;
+        }
+        self.qs_panel.scan.on_battery = on_battery;
+        self.qs_panel.bump();
+        self.touch();
+        self.qs_panel.view == Some(Detail::Wifi)
+    }
+
     pub fn tick_scan_age(&mut self, now: std::time::Instant) -> bool {
         if let Some((radio, since)) = self.qs_panel.radio_pending
             && now.saturating_duration_since(since) >= RADIO_PENDING
@@ -1405,6 +1421,16 @@ impl Topbar {
                     self.qs_panel.scan.age = Some(0);
                 }
             }
+            NetEvent::WifiScanned => {
+                if self.qs_panel.scan.running {
+                    return false;
+                }
+                self.qs_panel.scan.finished = Some(glide_ui::clock::now());
+                if self.qs_panel.scan.age == Some(0) {
+                    return false;
+                }
+                self.qs_panel.scan.age = Some(0);
+            }
             NetEvent::WifiInfo(info) => {
                 if self.qs_panel.wifi_info == info {
                     return false;
@@ -1416,7 +1442,7 @@ impl Topbar {
                 if settled {
                     self.settle_radio(Radio::Wifi);
                 }
-                if !settled && self.qs_panel.wifi_ready && self.qs_panel.wifi == networks {
+                if !settled && self.qs_panel.wifi_ready && crate::qs_net::same_rows(&self.qs_panel.wifi, &networks) {
                     return false;
                 }
                 self.qs_panel.wifi = networks;
@@ -2368,10 +2394,14 @@ fn scan_label(panel: &DetailPanel) -> Option<String> {
     if panel.scan.running {
         return Some(t(Key::QsScanning).to_string());
     }
-    match panel.scan.age? {
-        0..3 => Some(t(Key::QsScannedNow).to_string()),
-        age => Some(t(Key::QsScannedAgo).replace("{n}", &age.to_string())),
-    }
+    let age = panel.scan.age?;
+    let (now, ago) = if panel.scan.on_battery {
+        (Key::QsScannedNowShort, Key::QsScannedAgoShort)
+    } else {
+        (Key::QsScannedNow, Key::QsScannedAgo)
+    };
+    let text = if age < 3 { t(now).to_string() } else { t(ago).replace("{n}", &age.to_string()) };
+    Some(if panel.scan.on_battery { format!("{} \u{b7} {text}", t(Key::QsScanBattery)) } else { text })
 }
 
 fn draw_wifi_section(c: &mut Canvas<'_>, ctx: &QsRenderContext<'_>, rect: LocalRect, panel: &DetailPanel) {
@@ -2911,6 +2941,15 @@ mod tests {
         assert!(bar.tick_scan_age(start + std::time::Duration::from_secs(5)));
         assert_eq!(scan_label(&bar.qs_panel), Some(t(Key::QsScannedAgo).replace("{n}", "5")));
         assert!(!bar.tick_scan_age(start + std::time::Duration::from_millis(5400)), "one repaint a second");
+        assert!(bar.set_scan_on_battery(true), "the open page redraws when the power source changes");
+        assert!(!bar.set_scan_on_battery(true));
+        let battery = scan_label(&bar.qs_panel).expect("a battery line");
+        assert!(battery.starts_with(t(Key::QsScanBattery)), "{battery}");
+        assert!(battery.ends_with(&t(Key::QsScannedAgoShort).replace("{n}", "5")), "{battery}");
+        assert!(bar.apply_net_event(NetEvent::WifiScanned), "a quiet background scan freshens the age");
+        assert!(!bar.qs_panel.scan.running, "without a spinner");
+        assert!(scan_label(&bar.qs_panel).is_some_and(|label| label.ends_with(t(Key::QsScannedNowShort))));
+        assert!(!bar.apply_net_event(NetEvent::WifiScanned), "a second one in the same second redraws nothing");
     }
 
     #[test]

@@ -58,6 +58,16 @@ impl WifiNetwork {
             _ => "network-wireless-signal-excellent",
         }
     }
+
+    #[must_use]
+    pub fn shows_as(&self, other: &Self) -> bool {
+        self.level() == other.level() && Self { signal: other.signal, ..self.clone() } == *other
+    }
+}
+
+#[must_use]
+pub fn same_rows(a: &[WifiNetwork], b: &[WifiNetwork]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.shows_as(b))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +154,7 @@ pub struct WifiInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetEvent {
     WifiScanning(bool),
+    WifiScanned,
     WifiInfo(Option<WifiInfo>),
     Vpn(Vec<VpnConnection>),
     VpnResult { name: String, result: Result<(), ConnectError> },

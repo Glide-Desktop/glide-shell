@@ -8,6 +8,8 @@ use crate::state::GlideState;
 use crate::topbar::{Detail, PanelAction, PromptOutcome, RowTarget};
 
 pub const RESCAN_INTERVAL: Duration = Duration::from_secs(8);
+pub const PAGE_TICK: Duration = Duration::from_secs(1);
+const WIFI_SCAN_SETTLE: Duration = Duration::from_secs(4);
 const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
 const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 const BLUETOOTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -89,7 +91,7 @@ pub fn sort_networks(networks: &mut [WifiNetwork]) {
     networks.sort_by(|a, b| {
         b.connected
             .cmp(&a.connected)
-            .then(b.signal.cmp(&a.signal))
+            .then(b.level().cmp(&a.level()))
             .then_with(|| a.ssid.to_lowercase().cmp(&b.ssid.to_lowercase()))
     });
 }
@@ -300,6 +302,7 @@ pub fn sort_outputs(outputs: &mut [AudioOutput]) {
 pub enum NetRequest {
     ScanWifi,
     RescanWifi,
+    RefreshWifi,
     ScanBluetooth,
     ScanOutputs,
     ScanInputs,
@@ -318,6 +321,7 @@ impl std::fmt::Debug for NetRequest {
         match self {
             Self::ScanWifi => f.write_str("ScanWifi"),
             Self::RescanWifi => f.write_str("RescanWifi"),
+            Self::RefreshWifi => f.write_str("RefreshWifi"),
             Self::ScanBluetooth => f.write_str("ScanBluetooth"),
             Self::ScanOutputs => f.write_str("ScanOutputs"),
             Self::ScanInputs => f.write_str("ScanInputs"),
@@ -344,6 +348,9 @@ type Sink = Box<dyn Fn(NetEvent) + Send + Sync>;
 
 static SINK: OnceLock<Sink> = OnceLock::new();
 static WIFI_SCANNING: AtomicBool = AtomicBool::new(false);
+static WIFI_LISTING: AtomicBool = AtomicBool::new(false);
+static WIFI_CONNECTING: AtomicU64 = AtomicU64::new(0);
+static SAVED_SSIDS: Mutex<Option<Vec<String>>> = Mutex::new(None);
 static BLUETOOTH_SCANNING: AtomicBool = AtomicBool::new(false);
 static OUTPUTS_SCANNING: AtomicBool = AtomicBool::new(false);
 static INPUTS_SCANNING: AtomicBool = AtomicBool::new(false);
@@ -369,7 +376,9 @@ pub fn request(request: NetRequest) {
         return;
     }
     let flag = match request {
-        NetRequest::ScanWifi | NetRequest::RescanWifi => Some(&WIFI_SCANNING),
+        NetRequest::ScanWifi => Some(&WIFI_LISTING),
+        NetRequest::RescanWifi | NetRequest::RefreshWifi if WIFI_CONNECTING.load(Ordering::Acquire) > 0 => return,
+        NetRequest::RescanWifi | NetRequest::RefreshWifi => Some(&WIFI_SCANNING),
         NetRequest::ScanBluetooth => Some(&BLUETOOTH_SCANNING),
         NetRequest::ScanOutputs => Some(&OUTPUTS_SCANNING),
         NetRequest::ScanInputs => Some(&INPUTS_SCANNING),
@@ -410,20 +419,43 @@ pub fn request(request: NetRequest) {
 }
 
 fn emit_wifi() {
-    emit_scanned(scan_wifi("auto"));
+    forget_saved_ssids();
+    emit_scanned(list_wifi());
+}
+
+pub(crate) fn request_wifi_scan() -> bool {
+    let requested = run_with_timeout("nmcli", &["dev", "wifi", "rescan"], SCAN_TIMEOUT)
+        .is_some_and(|output| output.status.success());
+    if !requested {
+        tracing::debug!("NetworkManager refused a wi-fi scan request");
+    }
+    requested
 }
 
 fn run_request(request: NetRequest) {
     match request {
-        NetRequest::ScanWifi => emit_wifi(),
+        NetRequest::ScanWifi => {
+            if let Some(networks) = list_wifi() {
+                emit(NetEvent::Wifi(networks));
+            }
+        }
         NetRequest::RescanWifi => {
             emit(NetEvent::WifiScanning(true));
-            let scanned = scan_wifi("yes").or_else(|| {
-                tracing::debug!("a forced wi-fi scan was refused; listing what NetworkManager has");
-                scan_wifi("no")
-            });
-            emit_scanned(scanned);
+            forget_saved_ssids();
+            request_wifi_scan();
+            emit_scanned(list_wifi());
+            std::thread::sleep(WIFI_SCAN_SETTLE);
+            emit_scanned(list_wifi());
             emit(NetEvent::WifiScanning(false));
+        }
+        NetRequest::RefreshWifi => {
+            if request_wifi_scan() {
+                std::thread::sleep(WIFI_SCAN_SETTLE);
+                if let Some(networks) = list_wifi() {
+                    emit(NetEvent::Wifi(networks));
+                }
+                emit(NetEvent::WifiScanned);
+            }
         }
         NetRequest::ForgetWifi { ssid } => {
             let result = forget_wifi(&ssid);
@@ -432,7 +464,9 @@ fn run_request(request: NetRequest) {
         }
         NetRequest::ScanBluetooth => emit(NetEvent::Bluetooth(scan_bluetooth())),
         NetRequest::ConnectWifi { ssid, password, saved } => {
+            WIFI_CONNECTING.fetch_add(1, Ordering::AcqRel);
             let result = connect_wifi(&ssid, password.as_deref(), saved);
+            WIFI_CONNECTING.fetch_sub(1, Ordering::AcqRel);
             if let Err(error) = result {
                 tracing::info!(ssid, ?error, "wi-fi connection failed");
             }
@@ -529,16 +563,19 @@ fn stdout_of(program: &str, args: &[&str]) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn scan_wifi(rescan: &str) -> Option<Vec<WifiNetwork>> {
-    let list = stdout_of(
-        "nmcli",
-        &["-t", "-f", "IN-USE,SSID,SECURITY,SIGNAL,BARS", "dev", "wifi", "list", "--rescan", rescan],
-    )?;
+fn list_wifi() -> Option<Vec<WifiNetwork>> {
+    let list =
+        stdout_of("nmcli", &["-t", "-f", "IN-USE,SSID,SECURITY,SIGNAL,BARS", "dev", "wifi", "list", "--rescan", "no"])?;
     let mut networks = parse_wifi_list(&list);
-    let saved: Vec<String> = saved_wifi_profiles().into_iter().map(|(ssid, _)| ssid).collect();
-    mark_saved(&mut networks, &saved);
+    let mut saved = SAVED_SSIDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let saved = saved.get_or_insert_with(|| saved_wifi_profiles().into_iter().map(|(ssid, _)| ssid).collect());
+    mark_saved(&mut networks, saved);
     sort_networks(&mut networks);
     Some(networks)
+}
+
+fn forget_saved_ssids() {
+    *SAVED_SSIDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 fn emit_scanned(networks: Option<Vec<WifiNetwork>>) {
@@ -702,6 +739,15 @@ pub const fn scan_for(detail: Detail) -> Option<NetRequest> {
     }
 }
 
+#[must_use]
+pub const fn rescan_every(detail: Detail, on_battery: bool) -> Duration {
+    match (detail, on_battery) {
+        (Detail::Wifi, false) => WIFI_SCAN_SETTLE,
+        (Detail::Wifi, true) => Duration::from_secs(8),
+        _ => RESCAN_INTERVAL,
+    }
+}
+
 fn scan_detail(detail: Detail) {
     if let Some(scan) = scan_for(detail) {
         request(scan);
@@ -734,9 +780,22 @@ impl GlideState {
         }
     }
 
-    pub fn rescan_quick_settings_panel(&mut self) {
-        if let Some(detail) = self.topbar.detail() {
-            scan_detail(detail);
+    pub fn tick_quick_settings_panel(&mut self) {
+        let Some(detail) = self.topbar.detail() else {
+            self.session.qs_scanned = None;
+            return;
+        };
+        if detail == Detail::Wifi {
+            request(NetRequest::ScanWifi);
+        }
+        let now = std::time::Instant::now();
+        let every = rescan_every(detail, self.topbar.scans_on_battery());
+        if self.session.qs_scanned.is_none_or(|at| now.saturating_duration_since(at) >= every) {
+            self.session.qs_scanned = Some(now);
+            match detail {
+                Detail::Wifi => request(NetRequest::RefreshWifi),
+                _ => scan_detail(detail),
+            }
         }
     }
 
@@ -756,6 +815,7 @@ impl GlideState {
         match action {
             PanelAction::Open(detail) => {
                 if self.topbar.open_detail(detail) {
+                    self.session.qs_scanned = Some(std::time::Instant::now());
                     scan_detail(detail);
                     if detail == Detail::Vpn {
                         self.netbird_request(crate::netbird::Request::Refresh);
@@ -917,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn the_connected_network_sorts_first_then_by_signal() {
+    fn the_connected_network_sorts_first_then_by_bars_then_by_name() {
         let network = |ssid: &str, signal: u8, connected: bool| WifiNetwork {
             ssid: ssid.to_string(),
             security: Security::Passphrase,
@@ -930,10 +990,19 @@ mod tests {
             network("weak-home", 20, true),
             network("a", 90, false),
             network("c", 95, false),
+            network("d", 60, false),
         ];
         sort_networks(&mut networks);
         let order: Vec<&str> = networks.iter().map(|n| n.ssid.as_str()).collect();
-        assert_eq!(order, ["weak-home", "c", "a", "b"]);
+        assert_eq!(order, ["weak-home", "a", "b", "c", "d"], "rows with the same bars keep still while signal jitters");
+        let mut jittered = networks.clone();
+        jittered[1].signal = 80;
+        assert!(
+            glide_topbar::qs_net::same_rows(&networks, &jittered),
+            "a signal change inside one bar redraws nothing"
+        );
+        jittered[4].signal = 40;
+        assert!(!glide_topbar::qs_net::same_rows(&networks, &jittered), "losing a bar does");
     }
 
     #[test]
@@ -1122,6 +1191,14 @@ mod tests {
         }
         assert!(matches!(scan_for(Detail::Wifi), Some(NetRequest::RescanWifi)), "the page asks for a real scan");
         assert!(matches!(scan_for(Detail::Vpn), Some(NetRequest::ScanVpn)));
+    }
+
+    #[test]
+    fn the_wifi_page_scans_back_to_back_on_mains_and_less_often_on_battery() {
+        assert_eq!(rescan_every(Detail::Wifi, false), WIFI_SCAN_SETTLE, "the next scan starts as the last settles");
+        assert!(rescan_every(Detail::Wifi, true) > rescan_every(Detail::Wifi, false));
+        assert_eq!(rescan_every(Detail::Bluetooth, true), RESCAN_INTERVAL);
+        assert!(PAGE_TICK < WIFI_SCAN_SETTLE, "the cached list is read between scans");
     }
 
     #[test]
