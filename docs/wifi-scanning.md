@@ -1,6 +1,7 @@
 # Wi-Fi scanning, switching between known networks, captive portals
 
-Plan of 2026-11-26. Steps 1–3 are built in the shell; the rest is not.
+Plan of 2026-11-26. Built in glide-shell and glide-settings; not run live.
+Left: pixel scrolling (§5) and whether a phone hotspot reads as metered (§3).
 
 ## Findings
 
@@ -34,7 +35,9 @@ Plan of 2026-11-26. Steps 1–3 are built in the shell; the rest is not.
   and the cached list (`list --rescan no`) is read every second. Saved
   networks are cached between reads, rows sort by bars rather than raw signal,
   and no scan is asked for while a connection is being made.
-- glide-settings: the same in `services/network.rs` — not done yet.
+- glide-settings: the Network page asks for a scan without waiting on open,
+  after a change and on each 4 s poll (every other one on battery), lists the
+  cache, and reads "Fewer scans on battery · …" on battery.
 
 ## 2. One scanner in the compositor — done
 
@@ -94,8 +97,9 @@ picks made in Settings or nmcli. A network the device was ever metered on is
 remembered and never chosen as a way out of another
 metered one, so two phone hotspots do not swap back and forth. Not yet known:
 whether NetworkManager reports a Pixel hotspot as metered at all
-(`nmcli -g GENERAL.METERED dev show wlan0` while on it). The Settings half
-(the switch and the priority order) is not built.
+(`nmcli -g GENERAL.METERED dev show wlan0` while on it). Settings › Network
+has the switch ("Switch to preferred networks") and a "Network order" group
+whose up / down buttons renumber `connection.autoconnect-priority`.
 
 NetworkManager never leaves a working connection for a better one, and iwd
 roams only between access points of the same network. Glide decides:
@@ -128,7 +132,9 @@ user has signed in. The notice is a resident island notice ("Sign in to
 «SSID»") whose Sign In button opens `http://<default gateway>` (from
 `/proc/net/route`) with `xdg-open`, launched with an activation token so the
 browser comes forward. Nothing shows while NetworkManager's check
-is switched off; the Settings switch for it is not built.
+is switched off; Settings › Network › "Detect sign-in pages" sets it
+(NetworkManager's ConnectivityCheckEnabled; whether NetworkManager keeps it
+across restarts was not checked — its state file is root-only).
 
 - Settings switch for the connectivity check (`ConnectivityCheckEnabled`, a
   writable NetworkManager property that it persists itself).
