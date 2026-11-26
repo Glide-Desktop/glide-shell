@@ -430,7 +430,7 @@ pub struct SessionServices {
     pub end: crate::session_end::SessionEnd,
     pub battery_alert: crate::battery_alert::BatteryAlert,
     pub battery_saver: crate::battery_alert::Saver,
-    pub qs_scanned: Option<std::time::Instant>,
+    pub qs_scan: crate::wifi_scan::Cadence,
     pub wifi_scan: crate::wifi_scan::Scanner,
     pub portal: crate::portal::Portal,
     pub prompts: crate::agent_prompt::Prompts,
@@ -1720,8 +1720,12 @@ impl GlideState {
         if self.session.osd.status(levels, std::time::Instant::now()) {
             self.queue_redraw();
         }
-        self.session.wifi_scan.set_link(crate::wifi_scan::Link::of(&status), std::time::Instant::now());
+        let now = std::time::Instant::now();
+        self.session.wifi_scan.set_link(crate::wifi_scan::Link::of(&status), now);
         self.session.wifi_scan.set_on_battery(discharging);
+        let network =
+            if status.wifi_ssid.is_empty() && status.ethernet_connected { "\u{1}wired" } else { &status.wifi_ssid };
+        self.session.portal.note_network(network, now);
         if self.topbar.set_scan_on_battery(discharging) {
             self.queue_redraw();
         }

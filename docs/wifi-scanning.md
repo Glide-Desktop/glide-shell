@@ -42,10 +42,14 @@ Plan of 2026-11-26. Steps 1–3 are built in the shell; the rest is not.
 the compositor's 1 s network timer (`tick_network_scans`) through the same
 `nmcli dev wifi rescan` requests. The link comes from the system status
 (`Link::of`: off without a radio, in airplane mode or on a cable), the battery
-from `handle_system_status`; resume and lid open restart the burst. A
-connected scan samples the wireless interface's byte counters for 2 s on the
-worker first and is skipped above 32 KiB/s. The QS Wi-Fi page counts as a
-scan, so the background waits a full interval after it closes.
+from `handle_system_status`; resume and lid open restart the burst. A scan is
+stamped only when the worker accepted it (`Cadence`, `try_request`), so a
+request refused while the previous scan still runs is retried on the next
+tick. A connected scan runs only when a switch could follow (`may_switch`:
+switching on, and the link metered or a saved network of higher priority),
+and is skipped when the wireless interface moved 32 KiB/s or 10 packets/s
+over 2 s — the packet rate catches calls, games and ssh. The QS Wi-Fi page
+counts as a scan, so the background waits a full interval after it closes.
 
 Modes:
 
@@ -83,8 +87,11 @@ current one to end.
 
 Built as `wifi_scan::Switcher` (pure, unit-tested), run on the worker after a
 connected background scan that found the link idle, behind
-`general.switch-to-preferred-networks` (default on). A network the device was
-ever metered on is remembered and never chosen as a way out of another
+`general.switch-to-preferred-networks` (default on). A network picked by hand
+in QS is held for as long as it stays connected (not 5 minutes), and going
+back to the network the shell just left holds that one too, which also covers
+picks made in Settings or nmcli. A network the device was ever metered on is
+remembered and never chosen as a way out of another
 metered one, so two phone hotspots do not swap back and forth. Not yet known:
 whether NetworkManager reports a Pixel hotspot as metered at all
 (`nmcli -g GENERAL.METERED dev show wlan0` while on it). The Settings half
@@ -113,12 +120,14 @@ Same-SSID roaming stays with iwd.
 
 ## 4. Captive portals — the notice is done in the shell
 
-`portal.rs`: the network timer reads NetworkManager's connectivity every 5 s
-(`nmcli -t networking connectivity`, the cached state) and, while it says
+`portal.rs`: for a minute after the network changes, the network timer reads
+NetworkManager's connectivity every 5 s (`nmcli -t networking connectivity`,
+the cached state) and, while it says
 `portal`, asks for a real check every 10 s so the notice goes as soon as the
 user has signed in. The notice is a resident island notice ("Sign in to
 «SSID»") whose Sign In button opens `http://<default gateway>` (from
-`/proc/net/route`) with `xdg-open`. Nothing shows while NetworkManager's check
+`/proc/net/route`) with `xdg-open`, launched with an activation token so the
+browser comes forward. Nothing shows while NetworkManager's check
 is switched off; the Settings switch for it is not built.
 
 - Settings switch for the connectivity check (`ConnectivityCheckEnabled`, a

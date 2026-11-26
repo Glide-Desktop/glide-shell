@@ -4,16 +4,30 @@ pub const NOTICE_ID: u32 = u32::MAX - 14;
 pub const SIGN_IN: &str = "sign-in";
 pub const CHECK_EVERY: Duration = Duration::from_secs(5);
 pub const RECHECK_EVERY: Duration = Duration::from_secs(10);
+pub const WATCH: Duration = Duration::from_mins(1);
 
 #[derive(Debug, Default)]
 pub struct Portal {
     pub behind: bool,
+    network: String,
+    watch_until: Option<Instant>,
     checked: Option<Instant>,
     probed: Option<Instant>,
 }
 
 impl Portal {
+    pub fn note_network(&mut self, network: &str, now: Instant) {
+        if self.network != network {
+            self.network = network.to_string();
+            self.watch_until = Some(now + WATCH);
+        }
+    }
+
     pub fn due(&mut self, now: Instant) -> Option<Probe> {
+        let watching = self.watch_until.is_some_and(|until| now < until);
+        if !self.behind && !watching {
+            return None;
+        }
         if self.checked.is_some_and(|at| now.saturating_duration_since(at) < CHECK_EVERY) {
             return None;
         }
@@ -94,7 +108,7 @@ impl crate::GlideState {
     pub fn open_sign_in_page(&mut self) {
         let mut command = std::process::Command::new("xdg-open");
         command.arg(sign_in_url());
-        if let Err(err) = crate::spawn_detached(command) {
+        if let Err(err) = self.spawn_user_process(command) {
             tracing::warn!("could not open the network's sign-in page: {err}");
         }
     }
@@ -123,11 +137,19 @@ mod tests {
     fn a_portal_is_checked_for_real_while_it_lasts_and_only_read_otherwise() {
         let start = Instant::now();
         let mut portal = Portal::default();
+        assert_eq!(portal.due(start), None, "nothing is asked before a network shows up");
+        portal.note_network("Cafe", start);
         assert_eq!(portal.due(start), Some(Probe::Read));
         assert_eq!(portal.due(start + Duration::from_secs(2)), None);
         portal.behind = true;
         assert_eq!(portal.due(start + CHECK_EVERY), Some(Probe::Check), "after signing in the state is asked anew");
         assert_eq!(portal.due(start + CHECK_EVERY * 2), Some(Probe::Read));
         assert_eq!(portal.due(start + CHECK_EVERY * 3), Some(Probe::Check));
+        portal.behind = false;
+        assert_eq!(portal.due(start + WATCH), None, "a settled network is left alone after a minute");
+        portal.note_network("Cafe", start + WATCH);
+        assert_eq!(portal.due(start + WATCH + CHECK_EVERY), None, "the same network starts no new watch");
+        portal.note_network("Home", start + WATCH);
+        assert!(portal.due(start + WATCH + CHECK_EVERY).is_some(), "a new one does");
     }
 }

@@ -377,15 +377,19 @@ fn emit(event: NetEvent) {
 }
 
 pub fn request(request: NetRequest) {
+    try_request(request);
+}
+
+pub fn try_request(request: NetRequest) -> bool {
     if SINK.get().is_none() {
-        return;
+        return false;
     }
     let flag = match request {
         NetRequest::ScanWifi => Some(&WIFI_LISTING),
         NetRequest::RescanWifi | NetRequest::RefreshWifi | NetRequest::BackgroundScan(_)
             if WIFI_CONNECTING.load(Ordering::Acquire) > 0 =>
         {
-            return;
+            return false;
         }
         NetRequest::RescanWifi | NetRequest::RefreshWifi | NetRequest::BackgroundScan(_) => Some(&WIFI_SCANNING),
         NetRequest::Captive(_) => Some(&CAPTIVE_PROBING),
@@ -397,7 +401,7 @@ pub fn request(request: NetRequest) {
     if let Some(flag) = flag
         && flag.swap(true, Ordering::AcqRel)
     {
-        return;
+        return false;
     }
     let audio = match &request {
         NetRequest::ScanOutputs => Some((&OUTPUTS_LOCK, None)),
@@ -425,7 +429,9 @@ pub fn request(request: NetRequest) {
         if let Some(flag) = flag {
             flag.store(false, Ordering::Release);
         }
+        return false;
     }
+    true
 }
 
 fn emit_wifi() {
@@ -443,21 +449,40 @@ pub(crate) fn request_wifi_scan() -> bool {
 }
 
 fn background_scan(kind: crate::wifi_scan::Background) {
-    use crate::wifi_scan::{Background, IDLE_SAMPLE, busy, traffic_bytes, wireless_interface};
-    if kind == Background::WhenIdle
-        && let Some(interface) = wireless_interface()
-        && let Some(before) = traffic_bytes(&interface)
-    {
-        std::thread::sleep(IDLE_SAMPLE);
-        if traffic_bytes(&interface).is_none_or(|after| busy(before, after, IDLE_SAMPLE)) {
-            tracing::debug!("skipping a background wi-fi scan while the link carries traffic");
-            return;
-        }
+    use crate::wifi_scan::{Background, IDLE_SAMPLE, busy, may_switch, traffic, wireless_interface};
+    if kind == Background::Now {
+        request_wifi_scan();
+        return;
     }
-    if request_wifi_scan() && kind == Background::WhenIdle && AUTO_SWITCH.load(Ordering::Relaxed) {
+    if !AUTO_SWITCH.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(interface) = wireless_interface() else { return };
+    let Some(known) = known_profiles() else { return };
+    let metered = device_metered(&interface);
+    if !may_switch(&known, metered) {
+        return;
+    }
+    let Some(before) = traffic(&interface) else { return };
+    std::thread::sleep(IDLE_SAMPLE);
+    if traffic(&interface).is_none_or(|after| busy(before, after, IDLE_SAMPLE)) {
+        tracing::debug!("skipping a background wi-fi scan while the link carries traffic");
+        return;
+    }
+    if request_wifi_scan() {
         std::thread::sleep(WIFI_SCAN_SETTLE);
-        switch_if_better();
+        switch_if_better(&known, metered);
     }
+}
+
+fn known_profiles() -> Option<Vec<crate::wifi_scan::Known>> {
+    stdout_of("nmcli", &["-t", "-f", "UUID,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY,ACTIVE", "con", "show"])
+        .map(|text| parse_known(&text, ssid_of))
+}
+
+fn device_metered(interface: &str) -> bool {
+    stdout_of("nmcli", &["-g", "GENERAL.METERED", "dev", "show", interface])
+        .is_some_and(|text| text.trim_start().starts_with("yes"))
 }
 
 pub static AUTO_SWITCH: AtomicBool = AtomicBool::new(true);
@@ -503,27 +528,22 @@ pub fn parse_known(text: &str, ssid_of: impl Fn(&str) -> Option<String>) -> Vec<
         .collect()
 }
 
-fn switch_if_better() {
-    let Some(text) =
-        stdout_of("nmcli", &["-t", "-f", "UUID,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY,ACTIVE", "con", "show"])
-    else {
-        return;
-    };
-    let known = parse_known(&text, ssid_of);
+fn switch_if_better(known: &[crate::wifi_scan::Known], metered: bool) {
     let Some(visible) = list_wifi() else { return };
-    let metered = crate::wifi_scan::wireless_interface()
-        .and_then(|interface| stdout_of("nmcli", &["-g", "GENERAL.METERED", "dev", "show", &interface]))
-        .is_some_and(|text| text.trim_start().starts_with("yes"));
     let now = std::time::Instant::now();
-    let Some(target) = with_switcher(|switcher| switcher.decide(&known, &visible, metered, now)) else {
+    let Some(target) = with_switcher(|switcher| switcher.decide(known, &visible, metered, now)) else {
         return;
     };
+    let current = known.iter().find(|profile| profile.active).map(|profile| profile.uuid.clone());
     tracing::info!(ssid = target.ssid, metered, priority = target.priority, "switching to a preferred wi-fi network");
     WIFI_CONNECTING.fetch_add(1, Ordering::AcqRel);
     let switched = run_with_timeout("nmcli", &["con", "up", "uuid", &target.uuid], WIFI_CONNECT_TIMEOUT)
         .is_some_and(|output| output.status.success());
     WIFI_CONNECTING.fetch_sub(1, Ordering::AcqRel);
     if switched {
+        if let Some(current) = current {
+            with_switcher(|switcher| switcher.switched_away(&current));
+        }
         emit(NetEvent::WifiSwitched(target.ssid));
     } else {
         tracing::info!(ssid = target.ssid, "switching to the preferred wi-fi network failed");
@@ -574,7 +594,7 @@ fn run_request(request: NetRequest) {
         }
         NetRequest::ScanBluetooth => emit(NetEvent::Bluetooth(scan_bluetooth())),
         NetRequest::ConnectWifi { ssid, password, saved } => {
-            with_switcher(|switcher| switcher.hand_picked(std::time::Instant::now()));
+            with_switcher(|switcher| switcher.hand_picked(Some(&ssid)));
             WIFI_CONNECTING.fetch_add(1, Ordering::AcqRel);
             let result = connect_wifi(&ssid, password.as_deref(), saved);
             WIFI_CONNECTING.fetch_sub(1, Ordering::AcqRel);
@@ -585,7 +605,7 @@ fn run_request(request: NetRequest) {
             emit_wifi();
         }
         NetRequest::DisconnectWifi { ssid } => {
-            with_switcher(|switcher| switcher.hand_picked(std::time::Instant::now()));
+            with_switcher(|switcher| switcher.hand_picked(None));
             let result = disconnect_wifi(&ssid);
             emit(NetEvent::WifiResult { ssid, result });
             emit_wifi();
@@ -918,24 +938,24 @@ impl GlideState {
         if detail == Some(Detail::Wifi) {
             request(NetRequest::ScanWifi);
             self.session.wifi_scan.scanned(now);
-        } else if let Some(kind) = self.session.wifi_scan.due(now) {
-            request(NetRequest::BackgroundScan(kind));
+        } else {
+            self.session.wifi_scan.run(now, |kind| try_request(NetRequest::BackgroundScan(kind)));
         }
         if let Some(probe) = self.session.portal.due(now) {
             request(NetRequest::Captive(probe));
         }
         let Some(detail) = detail else {
-            self.session.qs_scanned = None;
+            self.session.qs_scan.reset();
             return;
         };
         let every = rescan_every(detail, self.topbar.scans_on_battery());
-        if self.session.qs_scanned.is_none_or(|at| now.saturating_duration_since(at) >= every) {
-            self.session.qs_scanned = Some(now);
-            match detail {
-                Detail::Wifi => request(NetRequest::RefreshWifi),
-                _ => scan_detail(detail),
+        self.session.qs_scan.run(now, every, || {
+            if detail == Detail::Wifi {
+                return try_request(NetRequest::RefreshWifi);
             }
-        }
+            scan_detail(detail);
+            true
+        });
     }
 
     pub(crate) fn toggle_networking(&mut self) {
@@ -954,7 +974,7 @@ impl GlideState {
         match action {
             PanelAction::Open(detail) => {
                 if self.topbar.open_detail(detail) {
-                    self.session.qs_scanned = Some(std::time::Instant::now());
+                    self.session.qs_scan.stamp(std::time::Instant::now());
                     scan_detail(detail);
                     if detail == Detail::Vpn {
                         self.netbird_request(crate::netbird::Request::Refresh);
