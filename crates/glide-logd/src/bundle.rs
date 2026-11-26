@@ -45,7 +45,9 @@ pub fn detect_trigger(entry: &LogEntry) -> Option<String> {
         if msg_lower.contains("pcie bus error") || msg_lower.contains("aer:") || msg_lower.contains("aer ") {
             return Some("kernel-pcie-aer".to_owned());
         }
-        if msg_lower.contains("out of memory") || msg_lower.contains("oom-killer") || msg_lower.contains("killed process")
+        if msg_lower.contains("out of memory")
+            || msg_lower.contains("oom-killer")
+            || msg_lower.contains("killed process")
         {
             return Some("kernel-oom".to_owned());
         }
@@ -88,13 +90,8 @@ pub fn detect_trigger(entry: &LogEntry) -> Option<String> {
 }
 
 pub fn create_crash_bundle(
-    bundle_dirs: &[PathBuf],
-    state_dir: &Path,
-    reason: &str,
-    session_id: Option<String>,
-    version: Option<String>,
-    gpu_summary: Option<String>,
-    recent_events: &[LogEntry],
+    bundle_dirs: &[PathBuf], state_dir: &Path, reason: &str, session_id: Option<String>, version: Option<String>,
+    gpu_summary: Option<String>, recent_events: &[LogEntry],
 ) -> Result<CrashBundleSummary> {
     let ts_ms = now_ms();
     let ts_iso = format_iso_utc(ts_ms);
@@ -368,11 +365,7 @@ fn read_redacted_tail(path: &Path, max_bytes: usize) -> String {
         return String::new();
     }
     let text = String::from_utf8_lossy(&buf);
-    let trimmed = if len > cap {
-        text.find('\n').map_or(text.as_ref(), |idx| &text[idx + 1..])
-    } else {
-        text.as_ref()
-    };
+    let trimmed = if len > cap { text.find('\n').map_or(text.as_ref(), |idx| &text[idx + 1..]) } else { text.as_ref() };
     redact_sensitive(trimmed)
 }
 

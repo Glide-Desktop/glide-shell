@@ -234,9 +234,7 @@ fn call_tool(cfg: &McpConfig, name: &str, args: &Value) -> Result<Value> {
             if let Some(v) = args.get("max_size_mb").and_then(Value::as_u64) {
                 current.max_size_mb = v;
             }
-            if let Some(v) =
-                args.get("crash_bundle_keep").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok())
-            {
+            if let Some(v) = args.get("crash_bundle_keep").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()) {
                 current.crash_bundle_keep = v;
             }
             LogRequest::SetRetention { config: current }
@@ -252,11 +250,8 @@ fn call_tool(cfg: &McpConfig, name: &str, args: &Value) -> Result<Value> {
 }
 
 fn parse_query_args(args: &Value) -> LogQuery {
-    let min_level = args
-        .get("min_level")
-        .or_else(|| args.get("level"))
-        .and_then(Value::as_str)
-        .and_then(LogLevel::parse_lossy);
+    let min_level =
+        args.get("min_level").or_else(|| args.get("level")).and_then(Value::as_str).and_then(LogLevel::parse_lossy);
     let levels = args
         .get("levels")
         .and_then(Value::as_array)
@@ -345,10 +340,7 @@ fn execute_offline(cfg: &McpConfig, request: LogRequest) -> Result<LogResponse> 
         }
         LogRequest::GetRetention => {
             let store = LogStore::open(&cfg.logs_dir)?;
-            Ok(LogResponse::Retention {
-                config: store.get_retention()?,
-                stats: store.stats(&cfg.bundle_dirs)?,
-            })
+            Ok(LogResponse::Retention { config: store.get_retention()?, stats: store.stats(&cfg.bundle_dirs)? })
         }
         LogRequest::SetRetention { config } => {
             let store = LogStore::open(&cfg.logs_dir)?;
@@ -419,12 +411,8 @@ mod tests {
         )
         .unwrap();
 
-        let cfg = McpConfig {
-            socket_path: Some(root.join("missing.sock")),
-            state_dir,
-            logs_dir,
-            bundle_dirs: vec![bdir],
-        };
+        let cfg =
+            McpConfig { socket_path: Some(root.join("missing.sock")), state_dir, logs_dir, bundle_dirs: vec![bdir] };
 
         let init = handle_jsonrpc_line(&cfg, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#).unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "glide-logd");

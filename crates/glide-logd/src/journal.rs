@@ -120,11 +120,7 @@ pub fn parse_journal_json_line(line: &str, source: &str, kernel_filter: bool) ->
         .and_then(|s| s.parse::<i64>().ok())
         .map_or_else(now_ms, |us| us / 1_000);
 
-    let priority = obj
-        .get("PRIORITY")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<u8>().ok())
-        .unwrap_or(6);
+    let priority = obj.get("PRIORITY").and_then(|v| v.as_str()).and_then(|s| s.parse::<u8>().ok()).unwrap_or(6);
     let level = match priority {
         0..=3 => LogLevel::Error,
         4 => LogLevel::Warn,
@@ -174,12 +170,7 @@ pub fn snapshot_kernel_journal(lines: usize) -> String {
 }
 
 fn run_snapshot(args: &[&str]) -> String {
-    match Command::new("journalctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    {
+    match Command::new("journalctl").args(args).stdin(Stdio::null()).stderr(Stdio::null()).output() {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
         _ => String::new(),
     }

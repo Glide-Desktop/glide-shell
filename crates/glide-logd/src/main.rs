@@ -111,12 +111,7 @@ fn main() -> Result<()> {
 
     let store = Arc::new(Mutex::new(LogStore::open(&logs_dir)?));
     let (live_tx, _) = broadcast::channel::<LogEntry>(2048);
-    let ctx = Arc::new(DaemonContext {
-        store: Arc::clone(&store),
-        state_dir: state_dir.clone(),
-        bundle_dirs,
-        live_tx,
-    });
+    let ctx = Arc::new(DaemonContext { store: Arc::clone(&store), state_dir: state_dir.clone(), bundle_dirs, live_tx });
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
@@ -174,9 +169,7 @@ fn main() -> Result<()> {
 }
 
 async fn flush_ingested_batch(
-    ctx: &Arc<DaemonContext>,
-    buffer: &mut Vec<LogEntry>,
-    cooldowns: &mut HashMap<String, Instant>,
+    ctx: &Arc<DaemonContext>, buffer: &mut Vec<LogEntry>, cooldowns: &mut HashMap<String, Instant>,
 ) {
     let batch = std::mem::take(buffer);
     let store = Arc::clone(&ctx.store);

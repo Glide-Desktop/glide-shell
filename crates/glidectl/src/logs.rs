@@ -175,7 +175,8 @@ fn run_retention(out: &mut impl Write, args: &[String], json_output: bool) -> Re
             while idx < args.len() {
                 match args[idx].as_str() {
                     "--retain-all" => {
-                        let val = args.get(idx + 1).ok_or_else(|| anyhow::anyhow!("--retain-all requires true|false"))?;
+                        let val =
+                            args.get(idx + 1).ok_or_else(|| anyhow::anyhow!("--retain-all requires true|false"))?;
                         cfg.retain_all = parse_bool(val)?;
                         idx += 2;
                     }
@@ -185,7 +186,8 @@ fn run_retention(out: &mut impl Write, args: &[String], json_output: bool) -> Re
                         idx += 2;
                     }
                     "--max-size-mb" => {
-                        let val = args.get(idx + 1).ok_or_else(|| anyhow::anyhow!("--max-size-mb requires a number"))?;
+                        let val =
+                            args.get(idx + 1).ok_or_else(|| anyhow::anyhow!("--max-size-mb requires a number"))?;
                         cfg.max_size_mb = val.parse()?;
                         idx += 2;
                     }
@@ -215,7 +217,8 @@ fn run_retention(out: &mut impl Write, args: &[String], json_output: bool) -> Re
 fn run_tail(out: &mut impl Write, query: &LogQuery, json_output: bool) -> Result<()> {
     if let Some(sock) = socket_path()
         && sock.exists()
-        && let Ok((mut reader, resp)) = exchange_at(&sock, &LogRequest::TailLogs { query: query.clone() }, DEFAULT_IO_TIMEOUT)
+        && let Ok((mut reader, resp)) =
+            exchange_at(&sock, &LogRequest::TailLogs { query: query.clone() }, DEFAULT_IO_TIMEOUT)
         && matches!(resp, LogResponse::Subscribed)
     {
         reader.get_ref().set_read_timeout(None)?;
@@ -299,18 +302,16 @@ pub fn parse_log_query(args: &[String], newest_first_default: bool) -> Result<Lo
             }
             "--since" => {
                 let val = args.get(idx + 1).ok_or_else(|| anyhow::anyhow!("--since requires a timestamp"))?;
-                query.since_ms = Some(
-                    parse_timestamp_ms(val)
-                        .ok_or_else(|| anyhow::anyhow!("invalid --since timestamp (use ISO-8601 UTC or epoch ms): {val}"))?,
-                );
+                query.since_ms = Some(parse_timestamp_ms(val).ok_or_else(|| {
+                    anyhow::anyhow!("invalid --since timestamp (use ISO-8601 UTC or epoch ms): {val}")
+                })?);
                 idx += 2;
             }
             "--until" => {
                 let val = args.get(idx + 1).ok_or_else(|| anyhow::anyhow!("--until requires a timestamp"))?;
-                query.until_ms = Some(
-                    parse_timestamp_ms(val)
-                        .ok_or_else(|| anyhow::anyhow!("invalid --until timestamp (use ISO-8601 UTC or epoch ms): {val}"))?,
-                );
+                query.until_ms = Some(parse_timestamp_ms(val).ok_or_else(|| {
+                    anyhow::anyhow!("invalid --until timestamp (use ISO-8601 UTC or epoch ms): {val}")
+                })?);
                 idx += 2;
             }
             "--grep" => {
@@ -404,8 +405,7 @@ fn offline_fallback(request: LogRequest) -> Result<LogResponse> {
     match request {
         LogRequest::Ping => Ok(LogResponse::Pong),
         LogRequest::QueryLogs { query } => {
-            let mut entries: Vec<LogEntry> =
-                read_disk_entries().into_iter().filter(|e| query.matches(e)).collect();
+            let mut entries: Vec<LogEntry> = read_disk_entries().into_iter().filter(|e| query.matches(e)).collect();
             if query.newest_first {
                 entries.reverse();
             }
@@ -471,7 +471,9 @@ fn offline_fallback(request: LogRequest) -> Result<LogResponse> {
             let gpu_errors: Vec<LogEntry> = entries
                 .iter()
                 .rev()
-                .filter(|e| matches_sess(e) && e.level >= LogLevel::Warn && e.target.to_ascii_lowercase().contains("gpu"))
+                .filter(|e| {
+                    matches_sess(e) && e.level >= LogLevel::Warn && e.target.to_ascii_lowercase().contains("gpu")
+                })
                 .take(cap)
                 .cloned()
                 .collect();
@@ -656,11 +658,8 @@ fn read_disk_bundle(id: &str, cap: usize) -> Result<CrashBundleDetail> {
 fn create_disk_bundle(reason: &str) -> Result<CrashBundleSummary> {
     let ts_ms = now_ms();
     let ts_iso = format_iso_utc(ts_ms);
-    let slug: String = reason
-        .chars()
-        .take(40)
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
-        .collect();
+    let slug: String =
+        reason.chars().take(40).map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
     let slug = slug.trim_matches('-');
     let id = format!("glide-bundle-{}-{}", format_compact_utc(ts_ms), if slug.is_empty() { "manual" } else { slug });
 

@@ -85,7 +85,11 @@ impl Icon {
             let dst = ((off_y + y) * side + off_x) * 4;
             argb[dst..dst + row_bytes].copy_from_slice(&self.argb[src..src + row_bytes]);
         }
-        Self { width: i32::try_from(side).unwrap_or(self.width), height: i32::try_from(side).unwrap_or(self.height), argb }
+        Self {
+            width: i32::try_from(side).unwrap_or(self.width),
+            height: i32::try_from(side).unwrap_or(self.height),
+            argb,
+        }
     }
 }
 

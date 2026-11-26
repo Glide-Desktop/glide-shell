@@ -229,8 +229,7 @@ impl LogQuery {
             let in_msg = entry.message.to_ascii_lowercase().contains(&needle);
             let in_target = entry.target.to_ascii_lowercase().contains(&needle);
             let in_fields = !entry.fields.is_empty()
-                && serde_json::to_string(&entry.fields)
-                    .is_ok_and(|s| s.to_ascii_lowercase().contains(&needle));
+                && serde_json::to_string(&entry.fields).is_ok_and(|s| s.to_ascii_lowercase().contains(&needle));
             if !in_msg && !in_target && !in_fields {
                 return false;
             }
@@ -440,12 +439,9 @@ pub fn connect(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
 }
 
 pub fn exchange_at(
-    path: &Path,
-    request: &LogRequest,
-    timeout: Duration,
+    path: &Path, request: &LogRequest, timeout: Duration,
 ) -> io::Result<(BufReader<UnixStream>, LogResponse)> {
-    let mut payload =
-        serde_json::to_string(request).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let mut payload = serde_json::to_string(request).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     payload.push('\n');
 
     let mut reader = BufReader::new(connect(path, timeout)?);
@@ -463,17 +459,16 @@ pub fn exchange_at(
 }
 
 pub fn exchange(request: &LogRequest) -> io::Result<LogResponse> {
-    let path = socket_path()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR not set; cannot locate glide-logd.sock"))?;
+    let path = socket_path().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR not set; cannot locate glide-logd.sock")
+    })?;
     let (_, response) = exchange_at(&path, request, DEFAULT_IO_TIMEOUT)?;
     Ok(response)
 }
 
 #[must_use]
 pub fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 #[must_use]
@@ -771,7 +766,8 @@ mod tests {
 
     #[test]
     fn redacts_secrets_in_json_and_kv() {
-        let text = r#"auth failed password="super-secret" token=abc12345 Authorization: Bearer eyJhbGciOi.xyz normal=ok"#;
+        let text =
+            r#"auth failed password="super-secret" token=abc12345 Authorization: Bearer eyJhbGciOi.xyz normal=ok"#;
         let redacted = redact_sensitive(text);
         assert!(!redacted.contains("super-secret"), "{redacted}");
         assert!(!redacted.contains("abc12345"), "{redacted}");

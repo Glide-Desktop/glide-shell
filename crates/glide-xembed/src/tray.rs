@@ -182,7 +182,9 @@ pub fn target_size(desired: u16, hints: Option<&[u32]>) -> (u16, u16) {
     (w.clamp(1, desired.max(1)), h.clamp(1, desired.max(1)))
 }
 
-fn send_xembed(conn: &RustConnection, atom: Atom, window: Window, time: u32, opcode: u32, detail: u32, data1: u32) -> anyhow::Result<()> {
+fn send_xembed(
+    conn: &RustConnection, atom: Atom, window: Window, time: u32, opcode: u32, detail: u32, data1: u32,
+) -> anyhow::Result<()> {
     let message = ClientMessageEvent::new(32, window, atom, [time, opcode, detail, data1, 0]);
     conn.send_event(false, window, EventMask::NO_EVENT, message)?;
     Ok(())
@@ -340,8 +342,11 @@ fn wm_class(conn: &RustConnection, window: Window) -> Option<String> {
 }
 
 fn wm_normal_hints(conn: &RustConnection, window: Window) -> Option<Vec<u32>> {
-    let reply =
-        conn.get_property(false, window, AtomEnum::WM_NORMAL_HINTS, AtomEnum::WM_SIZE_HINTS, 0, 18).ok()?.reply().ok()?;
+    let reply = conn
+        .get_property(false, window, AtomEnum::WM_NORMAL_HINTS, AtomEnum::WM_SIZE_HINTS, 0, 18)
+        .ok()?
+        .reply()
+        .ok()?;
     let values: Vec<u32> = reply.value32()?.collect();
     (!values.is_empty()).then_some(values)
 }
@@ -762,10 +767,9 @@ impl Host {
         };
         let damaged = self.icons[at].damaged;
         let known = &self.icons[at].look;
-        let Some((icon, _)) = self
-            .capture(window)
-            .filter(|(icon, depth)| !icon.is_blank() && !icon.is_unpainted_opaque(*depth, damaged) && *icon != known.icon)
-        else {
+        let Some((icon, _)) = self.capture(window).filter(|(icon, depth)| {
+            !icon.is_blank() && !icon.is_unpainted_opaque(*depth, damaged) && *icon != known.icon
+        }) else {
             return;
         };
         let look = Look { icon, ..known.clone() };

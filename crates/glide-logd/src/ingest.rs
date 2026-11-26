@@ -41,11 +41,7 @@ impl WatchedFile {
     }
 }
 
-pub fn spawn_file_ingester(
-    state_dir: PathBuf,
-    store: Arc<Mutex<LogStore>>,
-    tx: mpsc::Sender<LogEntry>,
-) {
+pub fn spawn_file_ingester(state_dir: PathBuf, store: Arc<Mutex<LogStore>>, tx: mpsc::Sender<LogEntry>) {
     tokio::spawn(async move {
         let mut watched = vec![
             WatchedFile::new(state_dir.join("glide.events.jsonl"), "compositor", true),

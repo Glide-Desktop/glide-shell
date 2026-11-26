@@ -236,11 +236,7 @@ impl LogStore {
             bind.push(Value::Text(format!("%{}%", grep.to_ascii_lowercase())));
         }
 
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        };
+        let where_sql = if clauses.is_empty() { String::new() } else { format!("WHERE {}", clauses.join(" AND ")) };
 
         let count_sql = format!("SELECT COUNT(*) FROM logs {where_sql}");
         let total_matched: u64 = self
@@ -333,13 +329,7 @@ impl LogStore {
             ..LogQuery::default()
         })?;
 
-        Ok(GpuSummary {
-            device_lines,
-            gpu_errors,
-            kernel_gpu_events,
-            total_gpu_errors,
-            total_kernel_events,
-        })
+        Ok(GpuSummary { device_lines, gpu_errors, kernel_gpu_events, total_gpu_errors, total_kernel_events })
     }
 
     pub fn get_retention(&self) -> Result<RetentionConfig> {
@@ -373,8 +363,8 @@ impl LogStore {
         let dest = archives.join(dest_name);
         let tmp = archives.join(format!(".tmp-{}.gz", now_ms()));
 
-        let mut reader = File::open(source_path)
-            .with_context(|| format!("open log for archiving {}", source_path.display()))?;
+        let mut reader =
+            File::open(source_path).with_context(|| format!("open log for archiving {}", source_path.display()))?;
         let out_file = File::create(&tmp).with_context(|| format!("create archive temp {}", tmp.display()))?;
         let mut encoder = GzEncoder::new(out_file, Compression::default());
         io::copy(&mut reader, &mut encoder)?;
@@ -433,10 +423,7 @@ impl LogStore {
     }
 
     pub fn apply_retention(
-        &self,
-        override_days: Option<u32>,
-        override_max_mb: Option<u64>,
-        force: bool,
+        &self, override_days: Option<u32>, override_max_mb: Option<u64>, force: bool,
     ) -> Result<(u64, u64, u64)> {
         let cfg = self.get_retention()?;
         if !force && cfg.retain_all {
@@ -505,8 +492,7 @@ impl LogStore {
             }
 
             if total > max_bytes {
-                let total_rows: i64 =
-                    self.conn.query_row("SELECT COUNT(*) FROM logs", [], |r| r.get(0)).unwrap_or(0);
+                let total_rows: i64 = self.conn.query_row("SELECT COUNT(*) FROM logs", [], |r| r.get(0)).unwrap_or(0);
                 let to_drop = (total_rows / 4).max(1_000);
                 let deleted = self.conn.execute(
                     "DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY ts_ms ASC, id ASC LIMIT ?1)",
@@ -668,9 +654,8 @@ mod tests {
         assert_eq!(stored.len(), 2);
         assert!(stored[0].id > 0);
 
-        let (matched, total) = store
-            .query_logs(&LogQuery { min_level: Some(LogLevel::Warn), ..LogQuery::default() })
-            .unwrap();
+        let (matched, total) =
+            store.query_logs(&LogQuery { min_level: Some(LogLevel::Warn), ..LogQuery::default() }).unwrap();
         assert_eq!(total, 1);
         assert_eq!(matched[0].message, "DRM pageflip failed");
 

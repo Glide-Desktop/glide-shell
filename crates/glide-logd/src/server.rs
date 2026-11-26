@@ -26,11 +26,15 @@ impl DaemonContext {
     pub fn dispatch(&self, request: LogRequest) -> LogResponse {
         match request {
             LogRequest::Ping => LogResponse::Pong,
-            LogRequest::TailLogs { .. } => LogResponse::Error {
-                message: "TailLogs must be handled on the streaming connection".to_owned(),
-            },
+            LogRequest::TailLogs { .. } => {
+                LogResponse::Error { message: "TailLogs must be handled on the streaming connection".to_owned() }
+            }
             LogRequest::QueryLogs { query } => {
-                let res = self.store.lock().map_err(|_| anyhow::anyhow!("store lock poisoned")).and_then(|s| s.query_logs(&query));
+                let res = self
+                    .store
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("store lock poisoned"))
+                    .and_then(|s| s.query_logs(&query));
                 match res {
                     Ok((entries, total_matched)) => LogResponse::Logs { entries, total_matched },
                     Err(err) => LogResponse::Error { message: err.to_string() },
@@ -128,9 +132,10 @@ impl DaemonContext {
             let latest = sessions.first();
             let session_id = latest.map(|s| s.session_id.clone());
             let version = latest.and_then(|s| s.version.clone());
-            let gpu = guard.gpu_summary(session_id.as_deref(), 5).ok().and_then(|g| {
-                g.device_lines.first().map(|e| e.message.clone())
-            });
+            let gpu = guard
+                .gpu_summary(session_id.as_deref(), 5)
+                .ok()
+                .and_then(|g| g.device_lines.first().map(|e| e.message.clone()));
             let (entries, _) = guard
                 .query_logs(&LogQuery { limit: Some(1_000), newest_first: true, ..LogQuery::default() })
                 .unwrap_or_default();
@@ -207,8 +212,11 @@ async fn handle_client(stream: UnixStream, ctx: Arc<DaemonContext>) -> Result<()
         let request: LogRequest = match serde_json::from_str(trimmed) {
             Ok(req) => req,
             Err(err) => {
-                write_response(&mut write_half, &LogResponse::Error { message: format!("invalid request JSON: {err}") })
-                    .await?;
+                write_response(
+                    &mut write_half,
+                    &LogResponse::Error { message: format!("invalid request JSON: {err}") },
+                )
+                .await?;
                 continue;
             }
         };
