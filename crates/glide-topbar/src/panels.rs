@@ -1795,7 +1795,11 @@ pub(super) fn draw_detail(
     let geometry = detail_geometry(c.h, has_radio(detail), has_link(detail));
     draw_detail_header(c, ctx, &geometry, detail, (panel, status));
 
-    for item in detail_items(panel, detail, status, geometry.body, Some(ctx.painter)) {
+    let items = detail_items(panel, detail, status, geometry.body, Some(ctx.painter));
+    if let Some(thumb) = list_thumb(panel, detail, &items, c.w) {
+        c.fill(thumb, ctx.theme.track, R_ROUND);
+    }
+    for item in items {
         draw_item(c, ctx, (panel, status, profile), item);
     }
 
@@ -1826,6 +1830,36 @@ pub(super) fn draw_detail(
     }
     let text = (icon.loc.x + MENU_ICON + CARD_PAD_X, ext.loc.x - SP2, top, bottom);
     c.text(ctx.painter, text, TextAlign::Left, settings_label, theme.muted, &LINK_TEXT);
+}
+
+const LIST_THUMB_W: i32 = 3;
+
+fn list_thumb(panel: &DetailPanel, detail: Detail, items: &[DetailItem], width: i32) -> Option<LocalRect> {
+    let (scroll, total) = match detail {
+        Detail::Wifi => (panel.list_scroll, panel.wifi.len()),
+        Detail::Bluetooth => (panel.list_scroll, panel.devices.len()),
+        Detail::Sound => (panel.sound_scroll, panel.outputs.len() + panel.inputs.as_ref().map_or(0, Vec::len)),
+        Detail::Vpn | Detail::Battery | Detail::Power => return None,
+    };
+    let rows: Vec<LocalRect> = items
+        .iter()
+        .filter(|item| {
+            matches!(item.kind, ItemKind::Network(_) | ItemKind::Device(_) | ItemKind::Output(_) | ItemKind::Input(_))
+        })
+        .map(|item| item.rect)
+        .collect();
+    let first = scroll.min(total.saturating_sub(1));
+    let (top, last) = (rows.first()?, rows.last()?);
+    if first == 0 && rows.len() >= total {
+        return None;
+    }
+    let track = last.loc.y + last.size.h - top.loc.y;
+    let shown = rows.len().min(total) as i32;
+    let thumb = (track * shown / total as i32).max(glide_theme::spacing::SP4).min(track);
+    let hidden = (total as i32 - shown).max(1);
+    let offset = (track - thumb) * (first as i32).min(hidden) / hidden;
+    let x = width - super::QS_PAD / 2 - LIST_THUMB_W / 2;
+    Some(local_rect(x, top.loc.y + offset, LIST_THUMB_W, thumb))
 }
 
 fn draw_item(
@@ -2825,6 +2859,29 @@ mod tests {
         assert_eq!(third.loc.y, second.loc.y + DETAIL_CARD + DETAIL_CARD_GAP, "rows sit 2 px apart");
         assert_eq!(bar.detail_row(1), Some(RowTarget::Network(network("Cafe", false, false))));
         assert_eq!(bar.detail_row(9), None);
+    }
+
+    #[test]
+    fn a_long_list_shows_a_thumb_that_follows_the_scroll() {
+        let mut bar = open_wifi();
+        let geometry = detail_geometry(super::super::QS_PAGE_MAX, true, true);
+        let thumb = |bar: &Topbar| {
+            let items = detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), geometry.body, None);
+            list_thumb(&bar.qs_panel, Detail::Wifi, &items, super::super::QS_WIDTH)
+        };
+        assert_eq!(thumb(&bar), None, "three networks fit");
+        let many = (0..20).map(|n| network(&format!("Net {n}"), true, n == 0)).collect();
+        bar.apply_net_event(NetEvent::Wifi(many));
+        let top = thumb(&bar).expect("twenty do not");
+        assert!(top.loc.x > geometry.body.loc.x + geometry.body.size.w, "in the right gutter, clear of the rows");
+        assert!(bar.scroll_detail_list(5));
+        let lower = thumb(&bar).expect("still scrolled");
+        assert!(lower.loc.y > top.loc.y, "it moves down with the list");
+        assert!(bar.scroll_detail_list(100));
+        let bottom = thumb(&bar).expect("at the end");
+        let items = detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), geometry.body, None);
+        let last = items.iter().rfind(|item| matches!(item.kind, ItemKind::Network(_))).expect("a row");
+        assert_eq!(bottom.loc.y + bottom.size.h, last.rect.loc.y + last.rect.size.h, "and ends with the last row");
     }
 
     #[test]

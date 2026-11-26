@@ -6992,6 +6992,17 @@ mod tests {
                 bar.set_scan_on_battery(true);
                 bar.tick_scan_age(glide_ui::clock::now() + Duration::from_secs(12));
             }
+            "-many" => {
+                let net = |n: usize| crate::qs_net::WifiNetwork {
+                    ssid: format!("Мережа {n}"),
+                    security: crate::qs_net::Security::Passphrase,
+                    signal: 90 - n as u8 * 4,
+                    connected: n == 0,
+                    saved: n < 3,
+                };
+                bar.apply_net_event(crate::qs_net::NetEvent::Wifi((0..16).map(net).collect()));
+                bar.scroll_detail_list(4);
+            }
             _ => {}
         }
     }
@@ -7116,6 +7127,7 @@ mod tests {
                     (Detail::Wifi, None, "-info"),
                     (Detail::Wifi, None, "-password"),
                     (Detail::Wifi, None, "-battery"),
+                    (Detail::Wifi, None, "-many"),
                     (Detail::Bluetooth, None, ""),
                     (Detail::Vpn, None, ""),
                 ] {

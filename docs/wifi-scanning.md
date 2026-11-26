@@ -136,7 +136,11 @@ is switched off; the Settings switch for it is not built.
   network" that opens the default browser on `http://<gateway>` (what worked
   live on 2026-11-26), then `CheckConnectivity` once the page is closed or after a timeout.
 
-## 5. QS list scrolling
+## 5. QS list scrolling — a thumb is done
 
-Pixel scrolling (touchpad included) with `E_OUT` smoothing, a thin scrollbar
-and an edge fade, for the Wi-Fi, Bluetooth and Sound pages.
+The Wi-Fi, Bluetooth and Sound lists already scrolled by wheel and touchpad,
+one row per step; nothing showed that more rows existed. They now draw the
+notification centre's 3 px thumb in the right gutter (`panels::list_thumb`)
+whenever rows are hidden above or below. Pixel scrolling (a page raster
+cropped by an animated offset, with an edge fade) is not built: it reworks
+the page raster pipeline and could not be seen from a headless machine.
