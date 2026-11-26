@@ -6,7 +6,7 @@ use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent, GestureEndEvent,
         GesturePinchUpdateEvent as BackendGesturePinchUpdateEvent,
-        GestureSwipeUpdateEvent as BackendGestureSwipeUpdateEvent, InputBackend, InputEvent, KeyState,
+        GestureSwipeUpdateEvent as BackendGestureSwipeUpdateEvent, InputBackend, InputEvent, InputTime, KeyState,
         KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, TouchEvent as BackendTouchEvent,
     },
     input::{
@@ -769,20 +769,59 @@ pub fn touch_output_index(names: &[String]) -> Option<usize> {
     Some(internal.unwrap_or(0))
 }
 
-fn scroll_delta<I: InputBackend>(event: &I::PointerAxisEvent) -> crate::system_info::ScrollDelta {
-    use crate::system_info::ScrollDelta;
-    match (event.source(), event.amount_v120(Axis::Vertical)) {
-        (AxisSource::Wheel | AxisSource::WheelTilt, Some(v120)) => ScrollDelta::Wheel(v120),
-        (AxisSource::Wheel | AxisSource::WheelTilt, None) => {
-            ScrollDelta::Wheel(event.amount(Axis::Vertical).unwrap_or(0.0) * 120.0 / 15.0)
-        }
-        (AxisSource::Finger, _) if event.amount(Axis::Vertical) == Some(0.0) => ScrollDelta::Stop,
-        _ => ScrollDelta::Continuous(event.amount(Axis::Vertical).unwrap_or(0.0)),
-    }
+const SCROLL_AXES: [Axis; 2] = [Axis::Horizontal, Axis::Vertical];
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Scroll {
+    pub source: AxisSource,
+    pub time: InputTime,
+    pub raw: [Option<f64>; 2],
+    pub v120: [Option<f64>; 2],
+    pub factor: f64,
 }
 
-fn axis_amount<I: InputBackend>(event: &I::PointerAxisEvent, axis: Axis) -> f64 {
-    event.amount(axis).unwrap_or_else(|| event.amount_v120(axis).unwrap_or(0.0) * 15.0 / 120.0)
+impl Scroll {
+    fn of<I: InputBackend>(event: &I::PointerAxisEvent, factor: f64) -> Self {
+        Self {
+            source: event.source(),
+            time: event.time(),
+            raw: SCROLL_AXES.map(|axis| event.amount(axis)),
+            v120: SCROLL_AXES.map(|axis| event.amount_v120(axis)),
+            factor,
+        }
+    }
+
+    pub(crate) fn finger(time: InputTime, raw: [Option<f64>; 2], factor: f64) -> Self {
+        Self { source: AxisSource::Finger, time, raw, v120: [None, None], factor }
+    }
+
+    fn amount(&self, axis: usize) -> f64 {
+        self.raw[axis].unwrap_or_else(|| self.v120[axis].unwrap_or(0.0) * 15.0 / 120.0)
+    }
+
+    pub(crate) fn amounts(&self) -> [f64; 2] {
+        [self.amount(0), self.amount(1)]
+    }
+
+    fn stops(&self, axis: usize) -> bool {
+        self.source == AxisSource::Finger && self.raw[axis] == Some(0.0)
+    }
+
+    pub(crate) fn stops_any(&self) -> bool {
+        self.stops(0) || self.stops(1)
+    }
+
+    fn delta(&self) -> crate::system_info::ScrollDelta {
+        use crate::system_info::ScrollDelta;
+        match (self.source, self.v120[1]) {
+            (AxisSource::Wheel | AxisSource::WheelTilt, Some(v120)) => ScrollDelta::Wheel(v120),
+            (AxisSource::Wheel | AxisSource::WheelTilt, None) => {
+                ScrollDelta::Wheel(self.raw[1].unwrap_or(0.0) * 120.0 / 15.0)
+            }
+            (AxisSource::Finger, _) if self.stops(1) => ScrollDelta::Stop,
+            _ => ScrollDelta::Continuous(self.raw[1].unwrap_or(0.0)),
+        }
+    }
 }
 
 fn swipe_delta<I: InputBackend>(event: &I::GestureSwipeUpdateEvent, config: &GestureConfig) -> (f64, f64)
@@ -875,6 +914,7 @@ impl GlideState {
         if swallowed {
             return;
         }
+        self.end_coast_on(&event);
         match event {
             InputEvent::Keyboard { event, .. } => self.handle_keyboard_event::<I>(&event, waking),
             InputEvent::PointerMotion { event, .. } => self.handle_pointer_motion::<I>(&event),
@@ -3223,20 +3263,20 @@ impl GlideState {
         }
     }
 
-    fn topbar_scroll<I: InputBackend>(&mut self, event: &I::PointerAxisEvent) -> bool {
+    fn topbar_scroll(&mut self, scroll: &Scroll) -> Option<bool> {
         let pos = self.seat.get_pointer().expect("a pointer was added in GlideState::new").current_location();
         let output = self.topbar_output_at(pos);
         if self.screen_locked() || self.topbar_suppressed_on(output) {
-            return false;
+            return None;
         }
         let slot = self.topbar.slot_at(pos);
         if slot.is_none() && !self.topbar.contains(output, pos) {
-            return false;
+            return None;
         }
-        let delta = scroll_delta::<I>(event);
+        let delta = scroll.delta();
         if let Some(crate::topbar::Slot::Tray(id)) = slot {
             self.scroll_tray(id, delta);
-            return true;
+            return Some(false);
         }
         let inside_popup = self.topbar.popup_rect().is_some_and(|rect| {
             pos.x >= f64::from(rect.loc.x)
@@ -3248,25 +3288,28 @@ impl GlideState {
             if self.topbar.scroll_detail_by(delta) {
                 self.queue_redraw();
             }
-            return true;
+            return Some(true);
         }
+        let notifications = matches!(
+            slot,
+            Some(
+                crate::topbar::Slot::NcItem(_)
+                    | crate::topbar::Slot::NcItemDismiss(_)
+                    | crate::topbar::Slot::NcItemAction(_, _)
+            )
+        );
         let steps = self.topbar.scroll_steps(delta);
         if steps == 0 {
-            return true;
+            return Some(notifications);
         }
         let Some(slot) = slot else {
-            return true;
+            return Some(false);
         };
-        if matches!(
-            slot,
-            crate::topbar::Slot::NcItem(_)
-                | crate::topbar::Slot::NcItemDismiss(_)
-                | crate::topbar::Slot::NcItemAction(_, _)
-        ) {
+        if notifications {
             if self.topbar.scroll_notifications(steps) {
                 self.queue_redraw();
             }
-            return true;
+            return Some(true);
         }
         let step = i16::try_from(steps.saturating_mul(-5).clamp(-200, 200)).unwrap_or(0);
         let status = self.topbar.system_status();
@@ -3289,10 +3332,10 @@ impl GlideState {
             self.handle_qs_action(action);
             self.queue_redraw();
         }
-        true
+        Some(false)
     }
 
-    fn dock_scroll<I: InputBackend>(&mut self, event: &I::PointerAxisEvent) -> bool {
+    fn dock_scroll(&mut self, scroll: &Scroll) -> bool {
         if self.screen_locked()
             || !self.dock.is_enabled()
             || self.dock.is_hidden()
@@ -3310,7 +3353,7 @@ impl GlideState {
         let Some(index) = self.dock.item_at(area, pos) else {
             return true;
         };
-        let steps = self.dock.scroll_steps(scroll_delta::<I>(event));
+        let steps = self.dock.scroll_steps(scroll.delta());
         if steps != 0 {
             self.cycle_app_windows(index, steps);
         }
@@ -3318,21 +3361,32 @@ impl GlideState {
     }
 
     fn handle_pointer_axis<I: InputBackend>(&mut self, event: &I::PointerAxisEvent) {
-        if self.greeter.is_some()
-            || self.shot_active()
-            || self.picker_active()
-            || self.topbar_scroll::<I>(event)
-            || self.dock_scroll::<I>(event)
-        {
+        let factor =
+            self.input_config.pointer_settings(crate::config::is_touchpad(&Event::device(event))).scroll_factor;
+        let scroll = Scroll::of::<I>(event, factor);
+        if self.momentum_takes(&scroll) {
             return;
         }
+        let coasts = self.route_scroll(&scroll);
+        self.note_scroll_coasts(&scroll, coasts);
+    }
+
+    pub(crate) fn route_scroll(&mut self, scroll: &Scroll) -> bool {
+        if self.greeter.is_some() || self.shot_active() || self.picker_active() {
+            return false;
+        }
+        if let Some(coasts) = self.topbar_scroll(scroll) {
+            return coasts;
+        }
+        if self.dock_scroll(scroll) {
+            return false;
+        }
         if self.launcher.as_ref().is_some_and(|launcher| !launcher.is_closing()) {
-            let vertical = axis_amount::<I>(event, Axis::Vertical);
-            let horizontal = axis_amount::<I>(event, Axis::Horizontal);
+            let [horizontal, vertical] = scroll.amounts();
             let amount = if vertical == 0.0 { horizontal } else { vertical };
-            let finger = event.source() == AxisSource::Finger;
+            let finger = scroll.source == AxisSource::Finger;
             let Some(launcher) = self.launcher.as_mut() else {
-                return;
+                return false;
             };
             if amount == 0.0 {
                 if finger && launcher.end_scroll() {
@@ -3341,50 +3395,42 @@ impl GlideState {
             } else if launcher.scroll_by(amount, finger) {
                 self.queue_redraw();
             }
-            return;
+            return false;
         }
         let pointer = self.seat.get_pointer().map(|pointer| pointer.current_location());
         let over_overview = pointer.is_some_and(|at| self.overview.as_ref().is_some_and(|ui| ui.contains(at)));
         if over_overview {
-            let notch = event.amount_v120(Axis::Vertical).or_else(|| event.amount_v120(Axis::Horizontal));
+            let notch = scroll.v120[1].or(scroll.v120[0]);
             if let Some(notch) = notch.filter(|notch| notch.abs() >= 1.0) {
                 self.overview_page(if notch > 0.0 { 1 } else { -1 });
             }
-            return;
+            return false;
         }
 
-        let source = event.source();
-        let factor =
-            self.input_config.pointer_settings(crate::config::is_touchpad(&Event::device(event))).scroll_factor;
-        let notches = [Axis::Horizontal, Axis::Vertical]
-            .map(|axis| (event.amount_v120(axis).unwrap_or(0.0), axis_amount::<I>(event, axis)));
-        if self.smooth_wheel_takes(source, notches, factor) {
-            return;
+        let factor = scroll.factor;
+        let notches = [0, 1].map(|axis| (scroll.v120[axis].unwrap_or(0.0), scroll.amount(axis)));
+        if self.smooth_wheel_takes(scroll.source, notches, factor) {
+            return false;
         }
 
-        let mut frame = AxisFrame::new(event.time()).source(source);
-        for axis in [Axis::Horizontal, Axis::Vertical] {
-            let amount = factor * axis_amount::<I>(event, axis);
+        let mut frame = AxisFrame::new(scroll.time).source(scroll.source);
+        for (index, axis) in SCROLL_AXES.into_iter().enumerate() {
+            let amount = factor * scroll.amount(index);
             if amount != 0.0 {
                 frame = frame.value(axis, amount);
-                if let Some(discrete) = event.amount_v120(axis).map(|value| value * factor) {
-                    {
-                        frame = frame.v120(axis, discrete as i32);
-                    }
+                if let Some(discrete) = scroll.v120[index].map(|value| value * factor) {
+                    frame = frame.v120(axis, discrete as i32);
                 }
             }
-        }
-        if source == AxisSource::Finger {
-            for axis in [Axis::Horizontal, Axis::Vertical] {
-                if event.amount(axis) == Some(0.0) {
-                    frame = frame.stop(axis);
-                }
+            if scroll.stops(index) {
+                frame = frame.stop(axis);
             }
         }
 
         let pointer = self.seat.get_pointer().expect("a pointer was added in GlideState::new");
         pointer.axis(self, frame);
         pointer.frame(self);
+        !self.pointer_constrained()
     }
 
     fn clamp_coords(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {

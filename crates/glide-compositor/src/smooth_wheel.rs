@@ -235,7 +235,7 @@ fn root_of(surface: &WlSurface) -> WlSurface {
 }
 
 impl GlideState {
-    fn pointer_surface(&self) -> Option<WlSurface> {
+    pub(crate) fn pointer_surface(&self) -> Option<WlSurface> {
         let focus = self.seat.get_pointer()?.current_focus()?;
         focus.wl_surface().map(Cow::into_owned)
     }
@@ -330,6 +330,7 @@ impl GlideState {
     }
 
     pub fn flush_smooth_wheel_before(&mut self, next: Option<&WlSurface>) {
+        self.end_coast_before(next);
         if self.smooth_wheel.smoother.is_animating() && self.smooth_wheel.target.as_ref() != next {
             self.flush_smooth_wheel();
         }

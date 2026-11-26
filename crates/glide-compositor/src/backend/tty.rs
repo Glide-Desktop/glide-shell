@@ -1663,6 +1663,7 @@ impl GlideState {
             .map(|surface| surface.output.clone());
         if let Some(output) = surface_output {
             self.tick_smooth_wheel_on(&output);
+            self.tick_momentum_on(&output);
         }
         self.place_settling_workspace_swipe();
 

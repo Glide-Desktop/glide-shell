@@ -387,6 +387,7 @@ impl WakeTimer {
 
 #[derive(Default)]
 pub struct SessionServices {
+    pub momentum: crate::momentum::Momentum,
     pub config: crate::config::Config,
     pub password_prefs: glide_config::passwords::Prefs,
     pub pins: Option<Vec<crate::config::DockItemConfig>>,

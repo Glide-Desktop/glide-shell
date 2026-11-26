@@ -363,6 +363,7 @@ pub struct InputConfig {
     pub touchpad_scroll_factor: Option<f64>,
     pub smooth_wheel: bool,
     pub smooth_wheel_exclude: Vec<String>,
+    pub touchpad_momentum: bool,
     pub layout_indicator: bool,
 }
 
@@ -436,6 +437,7 @@ impl Default for InputConfig {
             touchpad_scroll_factor: None,
             smooth_wheel: true,
             smooth_wheel_exclude: Vec::new(),
+            touchpad_momentum: true,
             layout_indicator: true,
         }
     }

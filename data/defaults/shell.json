@@ -123,6 +123,7 @@
   "input.tap-to-click": true,
   "input.touchpad-accel-profile": null,
   "input.touchpad-accel-speed": null,
+  "input.touchpad-momentum": true,
   "input.touchpad-natural-scroll": null,
   "input.touchpad-scroll-factor": null,
   "input.xkb-layout": "",

@@ -42,6 +42,7 @@ mod lid;
 mod logging;
 mod media_art;
 mod mirror;
+mod momentum;
 mod netbird;
 mod nm_agent;
 mod otp;
@@ -253,6 +254,7 @@ fn tick_event_loop(state: &mut GlideState) {
     let osd_animating = state.session.osd.tick(std::time::Instant::now());
     let find_cursor_animating = state.session.find_cursor.tick(std::time::Instant::now());
     let wheel_animating = state.smooth_wheel_pending();
+    let momentum_animating = state.momentum_pending();
     let shot_animating = state.tick_shot();
     let shot_preview_animating = state.tick_shot_preview();
     let polkit_animating = state.tick_polkit();
@@ -269,6 +271,7 @@ fn tick_event_loop(state: &mut GlideState) {
         || shot_preview_animating
         || osd_animating
         || wheel_animating
+        || momentum_animating
         || snap_animating
         || topbar_animating
         || overview_animating
