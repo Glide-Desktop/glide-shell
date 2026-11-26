@@ -352,6 +352,7 @@ type Sink = Box<dyn Fn(NetEvent) + Send + Sync>;
 
 static SINK: OnceLock<Sink> = OnceLock::new();
 static WIFI_SCANNING: AtomicBool = AtomicBool::new(false);
+static WIFI_RESCANNING: AtomicBool = AtomicBool::new(false);
 static WIFI_LISTING: AtomicBool = AtomicBool::new(false);
 static CAPTIVE_PROBING: AtomicBool = AtomicBool::new(false);
 static WIFI_CONNECTING: AtomicU64 = AtomicU64::new(0);
@@ -391,7 +392,8 @@ pub fn try_request(request: NetRequest) -> bool {
         {
             return false;
         }
-        NetRequest::RescanWifi | NetRequest::RefreshWifi | NetRequest::BackgroundScan(_) => Some(&WIFI_SCANNING),
+        NetRequest::RescanWifi => Some(&WIFI_RESCANNING),
+        NetRequest::RefreshWifi | NetRequest::BackgroundScan(_) => Some(&WIFI_SCANNING),
         NetRequest::Captive(_) => Some(&CAPTIVE_PROBING),
         NetRequest::ScanBluetooth => Some(&BLUETOOTH_SCANNING),
         NetRequest::ScanOutputs => Some(&OUTPUTS_SCANNING),
