@@ -304,6 +304,7 @@ pub enum NetRequest {
     RescanWifi,
     RefreshWifi,
     BackgroundScan(crate::wifi_scan::Background),
+    Captive(crate::portal::Probe),
     ScanBluetooth,
     ScanOutputs,
     ScanInputs,
@@ -324,6 +325,7 @@ impl std::fmt::Debug for NetRequest {
             Self::RescanWifi => f.write_str("RescanWifi"),
             Self::RefreshWifi => f.write_str("RefreshWifi"),
             Self::BackgroundScan(kind) => f.debug_tuple("BackgroundScan").field(kind).finish(),
+            Self::Captive(probe) => f.debug_tuple("Captive").field(probe).finish(),
             Self::ScanBluetooth => f.write_str("ScanBluetooth"),
             Self::ScanOutputs => f.write_str("ScanOutputs"),
             Self::ScanInputs => f.write_str("ScanInputs"),
@@ -351,6 +353,7 @@ type Sink = Box<dyn Fn(NetEvent) + Send + Sync>;
 static SINK: OnceLock<Sink> = OnceLock::new();
 static WIFI_SCANNING: AtomicBool = AtomicBool::new(false);
 static WIFI_LISTING: AtomicBool = AtomicBool::new(false);
+static CAPTIVE_PROBING: AtomicBool = AtomicBool::new(false);
 static WIFI_CONNECTING: AtomicU64 = AtomicU64::new(0);
 static SAVED_SSIDS: Mutex<Option<Vec<String>>> = Mutex::new(None);
 static BLUETOOTH_SCANNING: AtomicBool = AtomicBool::new(false);
@@ -385,6 +388,7 @@ pub fn request(request: NetRequest) {
             return;
         }
         NetRequest::RescanWifi | NetRequest::RefreshWifi | NetRequest::BackgroundScan(_) => Some(&WIFI_SCANNING),
+        NetRequest::Captive(_) => Some(&CAPTIVE_PROBING),
         NetRequest::ScanBluetooth => Some(&BLUETOOTH_SCANNING),
         NetRequest::ScanOutputs => Some(&OUTPUTS_SCANNING),
         NetRequest::ScanInputs => Some(&INPUTS_SCANNING),
@@ -554,6 +558,15 @@ fn run_request(request: NetRequest) {
             }
         }
         NetRequest::BackgroundScan(kind) => background_scan(kind),
+        NetRequest::Captive(probe) => {
+            let args: &[&str] = match probe {
+                crate::portal::Probe::Read => &["-t", "networking", "connectivity"],
+                crate::portal::Probe::Check => &["-t", "networking", "connectivity", "check"],
+            };
+            if let Some(state) = stdout_of("nmcli", args) {
+                emit(NetEvent::Captive(crate::portal::is_portal(&state)));
+            }
+        }
         NetRequest::ForgetWifi { ssid } => {
             let result = forget_wifi(&ssid);
             emit(NetEvent::WifiResult { ssid, result });
@@ -883,6 +896,9 @@ impl GlideState {
             };
             self.show_island_alert(alert);
         }
+        if let NetEvent::Captive(behind) = &event {
+            self.handle_captive(*behind);
+        }
         if self.topbar.apply_net_event(event) {
             self.queue_redraw();
         }
@@ -904,6 +920,9 @@ impl GlideState {
             self.session.wifi_scan.scanned(now);
         } else if let Some(kind) = self.session.wifi_scan.due(now) {
             request(NetRequest::BackgroundScan(kind));
+        }
+        if let Some(probe) = self.session.portal.due(now) {
+            request(NetRequest::Captive(probe));
         }
         let Some(detail) = detail else {
             self.session.qs_scanned = None;

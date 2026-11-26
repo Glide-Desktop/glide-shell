@@ -50,6 +50,7 @@ mod paint;
 mod passwords_applet;
 mod phone_applet;
 mod polkit;
+mod portal;
 mod power;
 mod privilege;
 mod qr_scan;

@@ -1431,7 +1431,7 @@ impl Topbar {
                 }
                 self.qs_panel.scan.age = Some(0);
             }
-            NetEvent::WifiSwitched(_) => return false,
+            NetEvent::WifiSwitched(_) | NetEvent::Captive(_) => return false,
             NetEvent::WifiInfo(info) => {
                 if self.qs_panel.wifi_info == info {
                     return false;

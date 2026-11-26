@@ -432,6 +432,7 @@ pub struct SessionServices {
     pub battery_saver: crate::battery_alert::Saver,
     pub qs_scanned: Option<std::time::Instant>,
     pub wifi_scan: crate::wifi_scan::Scanner,
+    pub portal: crate::portal::Portal,
     pub prompts: crate::agent_prompt::Prompts,
     pub bell: Option<std::time::Instant>,
     pub volumes: crate::removable::Toasts,

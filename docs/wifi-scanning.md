@@ -111,7 +111,15 @@ roams only between access points of the same network. Glide decides:
 
 Same-SSID roaming stays with iwd.
 
-## 4. Captive portals
+## 4. Captive portals — the notice is done in the shell
+
+`portal.rs`: the network timer reads NetworkManager's connectivity every 5 s
+(`nmcli -t networking connectivity`, the cached state) and, while it says
+`portal`, asks for a real check every 10 s so the notice goes as soon as the
+user has signed in. The notice is a resident island notice ("Sign in to
+«SSID»") whose Sign In button opens `http://<default gateway>` (from
+`/proc/net/route`) with `xdg-open`. Nothing shows while NetworkManager's check
+is switched off; the Settings switch for it is not built.
 
 - Settings switch for the connectivity check (`ConnectivityCheckEnabled`, a
   writable NetworkManager property that it persists itself).

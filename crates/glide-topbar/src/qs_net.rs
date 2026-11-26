@@ -156,6 +156,7 @@ pub enum NetEvent {
     WifiScanning(bool),
     WifiScanned,
     WifiSwitched(String),
+    Captive(bool),
     WifiInfo(Option<WifiInfo>),
     Vpn(Vec<VpnConnection>),
     VpnResult { name: String, result: Result<(), ConnectError> },

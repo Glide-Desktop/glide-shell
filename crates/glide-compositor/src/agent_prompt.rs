@@ -171,6 +171,12 @@ impl crate::GlideState {
                 crate::system_info::open_storage_settings();
                 continue;
             }
+            if let LocalEvent::Action { id: crate::portal::NOTICE_ID, key } = &event
+                && key == crate::portal::SIGN_IN
+            {
+                self.open_sign_in_page();
+                continue;
+            }
             if let LocalEvent::Action { id: crate::power::SESSION_NOTICE_ID, key } = &event
                 && key == crate::power::END_ANYWAY
             {

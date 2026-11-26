@@ -397,6 +397,10 @@ glide_app::catalogue! {
     QsScannedNowShort => "just now", "щойно";
     QsScannedAgoShort => "{n} s ago", "{n} с тому";
     NetSwitchedToPreferred => "Wi-Fi switched to a preferred network", "Wi-Fi перемкнувся на пріоритетну мережу";
+    PortalSummary => "Sign in to \u{ab}{name}\u{bb}", "Увійдіть у мережу \u{ab}{name}\u{bb}";
+    PortalSummaryWired => "Sign in to the network", "Увійдіть у мережу";
+    PortalBody => "The network asks you to sign in before it lets you online.", "Мережа просить увійти, перш ніж пустити в інтернет.";
+    PortalSignIn => "Sign In", "Увійти";
     QsConnectShort => "Connect", "Під\u{2019}єднатися";
     QsDisconnectShort => "Disconnect", "Від\u{2019}єднатися";
     QsPasswordPlaceholder => "Network password", "Пароль до мережі";
