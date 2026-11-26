@@ -21,7 +21,9 @@ Left: whether a phone hotspot reads as metered (§3) and the gaps listed in §5.
   false`), so connectivity always read `full`, even behind a captive portal.
   It was switched on by hand on the user's machine.
 - The QS Wi-Fi list does scroll, but only by wheel notches (one row each), with
-  no scrollbar or hint that more rows exist.
+  no scrollbar or hint that more rows exist. The touchpad delta was quantised
+  into the same whole-row steps, so on 0.1.5 the list jumped 48 px at a time
+  (the user: no scrollbar, and it scrolled in jerks).
 - Under iwd, `LastScan` jumps to the request time the moment a scan is asked
   for, while access points keep arriving for up to 5 s after it. It says
   nothing about a finished scan, so scans run on a fixed cadence.
