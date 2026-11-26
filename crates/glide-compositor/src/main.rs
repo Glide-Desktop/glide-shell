@@ -74,6 +74,7 @@ mod super_keys;
 mod surface_fade;
 mod tiling;
 mod tray;
+mod wifi_scan;
 mod window;
 mod window_traits;
 mod xembed;
@@ -684,7 +685,10 @@ fn init_logind(event_loop: &mut EventLoop<'static, GlideState>, state: &mut Glid
             state.lock_screen();
         }
         logind::LoginEvent::Unlock => state.unlock_screen(),
-        logind::LoginEvent::Wake => state.release_held_keys("woke from sleep"),
+        logind::LoginEvent::Wake => {
+            state.release_held_keys("woke from sleep");
+            state.session.wifi_scan.wake(std::time::Instant::now());
+        }
     });
     if locked_at_start.recv_timeout(logind::STARTUP_WAIT).unwrap_or(false) {
         state.lock_screen();
@@ -789,7 +793,7 @@ fn init_quick_settings_network(event_loop: &mut EventLoop<'static, GlideState>) 
     GlideState::refresh_quick_settings_lists();
 
     let rescan = event_loop.handle().insert_source(Timer::from_duration(qs_net::PAGE_TICK), |_, (), state| {
-        state.tick_quick_settings_panel();
+        state.tick_network_scans();
         TimeoutAction::ToDuration(qs_net::PAGE_TICK)
     });
     if let Err(err) = rescan {

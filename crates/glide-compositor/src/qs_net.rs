@@ -303,6 +303,7 @@ pub enum NetRequest {
     ScanWifi,
     RescanWifi,
     RefreshWifi,
+    BackgroundScan(crate::wifi_scan::Background),
     ScanBluetooth,
     ScanOutputs,
     ScanInputs,
@@ -322,6 +323,7 @@ impl std::fmt::Debug for NetRequest {
             Self::ScanWifi => f.write_str("ScanWifi"),
             Self::RescanWifi => f.write_str("RescanWifi"),
             Self::RefreshWifi => f.write_str("RefreshWifi"),
+            Self::BackgroundScan(kind) => f.debug_tuple("BackgroundScan").field(kind).finish(),
             Self::ScanBluetooth => f.write_str("ScanBluetooth"),
             Self::ScanOutputs => f.write_str("ScanOutputs"),
             Self::ScanInputs => f.write_str("ScanInputs"),
@@ -377,8 +379,12 @@ pub fn request(request: NetRequest) {
     }
     let flag = match request {
         NetRequest::ScanWifi => Some(&WIFI_LISTING),
-        NetRequest::RescanWifi | NetRequest::RefreshWifi if WIFI_CONNECTING.load(Ordering::Acquire) > 0 => return,
-        NetRequest::RescanWifi | NetRequest::RefreshWifi => Some(&WIFI_SCANNING),
+        NetRequest::RescanWifi | NetRequest::RefreshWifi | NetRequest::BackgroundScan(_)
+            if WIFI_CONNECTING.load(Ordering::Acquire) > 0 =>
+        {
+            return;
+        }
+        NetRequest::RescanWifi | NetRequest::RefreshWifi | NetRequest::BackgroundScan(_) => Some(&WIFI_SCANNING),
         NetRequest::ScanBluetooth => Some(&BLUETOOTH_SCANNING),
         NetRequest::ScanOutputs => Some(&OUTPUTS_SCANNING),
         NetRequest::ScanInputs => Some(&INPUTS_SCANNING),
@@ -432,6 +438,21 @@ pub(crate) fn request_wifi_scan() -> bool {
     requested
 }
 
+fn background_scan(kind: crate::wifi_scan::Background) {
+    use crate::wifi_scan::{Background, IDLE_SAMPLE, busy, traffic_bytes, wireless_interface};
+    if kind == Background::WhenIdle
+        && let Some(interface) = wireless_interface()
+        && let Some(before) = traffic_bytes(&interface)
+    {
+        std::thread::sleep(IDLE_SAMPLE);
+        if traffic_bytes(&interface).is_none_or(|after| busy(before, after, IDLE_SAMPLE)) {
+            tracing::debug!("skipping a background wi-fi scan while the link carries traffic");
+            return;
+        }
+    }
+    request_wifi_scan();
+}
+
 fn run_request(request: NetRequest) {
     match request {
         NetRequest::ScanWifi => {
@@ -457,6 +478,7 @@ fn run_request(request: NetRequest) {
                 emit(NetEvent::WifiScanned);
             }
         }
+        NetRequest::BackgroundScan(kind) => background_scan(kind),
         NetRequest::ForgetWifi { ssid } => {
             let result = forget_wifi(&ssid);
             emit(NetEvent::WifiResult { ssid, result });
@@ -780,15 +802,19 @@ impl GlideState {
         }
     }
 
-    pub fn tick_quick_settings_panel(&mut self) {
-        let Some(detail) = self.topbar.detail() else {
+    pub fn tick_network_scans(&mut self) {
+        let now = std::time::Instant::now();
+        let detail = self.topbar.detail();
+        if detail == Some(Detail::Wifi) {
+            request(NetRequest::ScanWifi);
+            self.session.wifi_scan.scanned(now);
+        } else if let Some(kind) = self.session.wifi_scan.due(now) {
+            request(NetRequest::BackgroundScan(kind));
+        }
+        let Some(detail) = detail else {
             self.session.qs_scanned = None;
             return;
         };
-        if detail == Detail::Wifi {
-            request(NetRequest::ScanWifi);
-        }
-        let now = std::time::Instant::now();
         let every = rescan_every(detail, self.topbar.scans_on_battery());
         if self.session.qs_scanned.is_none_or(|at| now.saturating_duration_since(at) >= every) {
             self.session.qs_scanned = Some(now);

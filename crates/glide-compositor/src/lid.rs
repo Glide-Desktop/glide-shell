@@ -26,6 +26,7 @@ impl GlideState {
                 self.set_outputs_blanked(false);
             }
             self.release_held_keys("lid opened");
+            self.session.wifi_scan.wake(std::time::Instant::now());
         }
         if self.session.lid_closed != closed {
             tracing::info!(closed, "lid switch");

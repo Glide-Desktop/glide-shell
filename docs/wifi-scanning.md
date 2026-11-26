@@ -1,6 +1,6 @@
 # Wi-Fi scanning, switching between known networks, captive portals
 
-Plan of 2026-11-26. Step 1 is built; the rest is not.
+Plan of 2026-11-26. Steps 1 and 2 are built in the shell; the rest is not.
 
 ## Findings
 
@@ -36,10 +36,16 @@ Plan of 2026-11-26. Step 1 is built; the rest is not.
   and no scan is asked for while a connection is being made.
 - glide-settings: the same in `services/network.rs` — not done yet.
 
-## 2. One scanner in the compositor
+## 2. One scanner in the compositor — done
 
-A worker in the compositor owns background scanning, through the same
-`nmcli dev wifi rescan` requests on a fixed cadence.
+`wifi_scan::Scanner` (pure, unit-tested) owns background scanning, driven by
+the compositor's 1 s network timer (`tick_network_scans`) through the same
+`nmcli dev wifi rescan` requests. The link comes from the system status
+(`Link::of`: off without a radio, in airplane mode or on a cable), the battery
+from `handle_system_status`; resume and lid open restart the burst. A
+connected scan samples the wireless interface's byte counters for 2 s on the
+worker first and is skipped above 32 KiB/s. The QS Wi-Fi page counts as a
+scan, so the background waits a full interval after it closes.
 
 Modes:
 
@@ -63,9 +69,9 @@ interval grows, starting points to tune:
 | Mode | Mains | Battery |
 |---|---|---|
 | Fast (page open) | 4 s | 8 s |
-| Disconnected, first minute | 3–5 s | 10 s |
-| Disconnected | 15–20 s | 60 s |
-| Connected | 15–20 s | 60 s |
+| Disconnected, first minute | 4 s | 10 s |
+| Disconnected | 15 s | 60 s |
+| Connected | 20 s | 60 s |
 
 The user is told: on battery the scan line of the QS Network page and of
 Settings › Network reads "Fewer scans on battery · N s ago" ("Від батареї
