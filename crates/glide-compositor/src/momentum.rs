@@ -110,7 +110,7 @@ impl GlideState {
             self.session.momentum.tracker.clear();
             return false;
         }
-        if !scroll.stops_any() {
+        if !scroll.lifts() {
             self.end_coast(false);
             self.session.momentum.tracker.push(scroll.time.micros(), scroll.amounts());
             return false;
@@ -131,7 +131,7 @@ impl GlideState {
     }
 
     pub(crate) fn note_scroll_coasts(&mut self, scroll: &Scroll, coasts: bool) {
-        if scroll.source == AxisSource::Finger && !scroll.stops_any() {
+        if scroll.source == AxisSource::Finger && !scroll.lifts() {
             self.session.momentum.coasts = coasts;
         }
     }
@@ -187,6 +187,8 @@ impl GlideState {
         if matches!(
             event,
             InputEvent::Keyboard { .. }
+                | InputEvent::PointerMotion { .. }
+                | InputEvent::PointerMotionAbsolute { .. }
                 | InputEvent::PointerButton { .. }
                 | InputEvent::TouchDown { .. }
                 | InputEvent::GestureHoldBegin { .. }
@@ -215,6 +217,17 @@ mod tests {
             tracker.push(frame * FRAME, [0.0, step]);
         }
         (frames - 1) * FRAME
+    }
+
+    #[test]
+    fn only_a_frame_with_no_movement_left_is_a_lift() {
+        let time = InputTime::from_micros(0);
+        assert!(!Scroll::finger(time, [Some(0.0), Some(14.0)], 1.0).lifts(), "a drifting axis is not a lift");
+        assert!(!Scroll::finger(time, [None, Some(14.0)], 1.0).lifts());
+        assert!(Scroll::finger(time, [None, Some(0.0)], 1.0).lifts());
+        assert!(Scroll::finger(time, [Some(0.0), Some(0.0)], 1.0).lifts());
+        let wheel = Scroll { source: AxisSource::Wheel, ..Scroll::finger(time, [None, Some(0.0)], 1.0) };
+        assert!(!wheel.lifts());
     }
 
     #[test]

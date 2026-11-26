@@ -807,8 +807,8 @@ impl Scroll {
         self.source == AxisSource::Finger && self.raw[axis] == Some(0.0)
     }
 
-    pub(crate) fn stops_any(&self) -> bool {
-        self.stops(0) || self.stops(1)
+    pub(crate) fn lifts(&self) -> bool {
+        (self.stops(0) || self.stops(1)) && self.amounts().iter().all(|amount| *amount == 0.0)
     }
 
     fn delta(&self) -> crate::system_info::ScrollDelta {
