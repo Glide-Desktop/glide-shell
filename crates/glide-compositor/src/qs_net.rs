@@ -493,7 +493,25 @@ static SSIDS: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::
 
 fn with_switcher<T>(f: impl FnOnce(&mut crate::wifi_scan::Switcher) -> T) -> T {
     let mut switcher = SWITCHER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    f(switcher.get_or_insert_with(Default::default))
+    f(switcher.get_or_insert_with(|| {
+        let saved = metered_path().and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default();
+        crate::wifi_scan::Switcher::with_metered(crate::wifi_scan::parse_metered(&saved))
+    }))
+}
+
+fn metered_path() -> Option<std::path::PathBuf> {
+    glide_config::state_home().map(|dir| dir.join("glide").join("metered-networks"))
+}
+
+fn save_metered(text: &str) {
+    let Some(path) = metered_path() else { return };
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| glide_config::write_atomic(&path, text.as_bytes(), 0o600));
+    if let Err(err) = written {
+        tracing::warn!("could not save the networks seen metered: {err}");
+    }
 }
 
 fn ssid_of(uuid: &str) -> Option<String> {
@@ -533,7 +551,17 @@ pub fn parse_known(text: &str, ssid_of: impl Fn(&str) -> Option<String>) -> Vec<
 fn switch_if_better(known: &[crate::wifi_scan::Known], metered: bool) {
     let Some(visible) = list_wifi() else { return };
     let now = std::time::Instant::now();
-    let Some(target) = with_switcher(|switcher| switcher.decide(known, &visible, metered, now)) else {
+    let (target, learned) = with_switcher(|switcher| {
+        let before = switcher.metered().len();
+        let target = switcher.decide(known, &visible, metered, now);
+        let learned =
+            (switcher.metered().len() != before).then(|| crate::wifi_scan::format_metered(switcher.metered()));
+        (target, learned)
+    });
+    if let Some(text) = learned {
+        save_metered(&text);
+    }
+    let Some(target) = target else {
         return;
     };
     let current = known.iter().find(|profile| profile.active).map(|profile| profile.uuid.clone());

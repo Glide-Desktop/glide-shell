@@ -174,7 +174,29 @@ pub struct Switcher {
     metered: std::collections::HashSet<String>,
 }
 
+#[must_use]
+pub fn parse_metered(text: &str) -> std::collections::HashSet<String> {
+    text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect()
+}
+
+#[must_use]
+pub fn format_metered(metered: &std::collections::HashSet<String>) -> String {
+    let mut lines: Vec<&str> = metered.iter().map(String::as_str).collect();
+    lines.sort_unstable();
+    lines.iter().flat_map(|line| [*line, "\n"]).collect()
+}
+
 impl Switcher {
+    #[must_use]
+    pub fn with_metered(metered: std::collections::HashSet<String>) -> Self {
+        Self { metered, ..Self::default() }
+    }
+
+    #[must_use]
+    pub const fn metered(&self) -> &std::collections::HashSet<String> {
+        &self.metered
+    }
+
     pub fn hand_picked(&mut self, ssid: Option<&str>) {
         self.held = ssid.map(str::to_string);
         self.left = None;
@@ -336,6 +358,22 @@ mod tests {
         assert!(may_switch(&[known("Pixel", 0, true), known("Home", 0, false)], true), "a metered link");
         assert!(may_switch(&[known("Cafe", 0, true), known("Office", 5, false)], false), "a preferred one exists");
         assert!(!may_switch(&[known("Cafe", 0, false)], true), "nothing is connected");
+    }
+
+    #[test]
+    fn networks_seen_metered_survive_a_restart() {
+        let start = Instant::now();
+        let mut first = Switcher::default();
+        first.decide(&[known("Pixel", 0, true)], &[], true, start);
+        let saved = format_metered(first.metered());
+        assert_eq!(saved, "Pixel-uuid\n");
+        let mut after_restart = Switcher::with_metered(parse_metered(&saved));
+        let at_hotel = [known("Radisson", 0, true), known("Pixel", 0, false)];
+        let visible = [seen("Pixel", 95)];
+        for step in 0..3 {
+            assert_eq!(after_restart.decide(&at_hotel, &visible, true, at(start, step * 20)), None, "{step}");
+        }
+        assert_eq!(parse_metered("\n a \n\nb\n"), ["a".to_string(), "b".to_string()].into());
     }
 
     #[test]
