@@ -88,6 +88,7 @@
   "general.polkit-agent": true,
   "general.suspend-after-seconds": 0,
   "general.suspend-on-battery-after-seconds": 0,
+  "general.switch-to-preferred-networks": true,
   "general.terminal": null,
   "general.wallpaper": null,
   "general.wallpaper-fit": "cover",

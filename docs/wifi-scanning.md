@@ -1,6 +1,6 @@
 # Wi-Fi scanning, switching between known networks, captive portals
 
-Plan of 2026-11-26. Steps 1 and 2 are built in the shell; the rest is not.
+Plan of 2026-11-26. Steps 1–3 are built in the shell; the rest is not.
 
 ## Findings
 
@@ -79,7 +79,16 @@ Settings › Network reads "Fewer scans on battery · N s ago" ("Від бата
 mode. Plugging in or unplugging switches the intervals without waiting for the
 current one to end.
 
-## 3. Switch between known networks in the background
+## 3. Switch between known networks in the background — done in the shell
+
+Built as `wifi_scan::Switcher` (pure, unit-tested), run on the worker after a
+connected background scan that found the link idle, behind
+`general.switch-to-preferred-networks` (default on). A network the device was
+ever metered on is remembered and never chosen as a way out of another
+metered one, so two phone hotspots do not swap back and forth. Not yet known:
+whether NetworkManager reports a Pixel hotspot as metered at all
+(`nmcli -g GENERAL.METERED dev show wlan0` while on it). The Settings half
+(the switch and the priority order) is not built.
 
 NetworkManager never leaves a working connection for a better one, and iwd
 roams only between access points of the same network. Glide decides:

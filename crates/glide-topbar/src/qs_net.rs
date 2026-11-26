@@ -155,6 +155,7 @@ pub struct WifiInfo {
 pub enum NetEvent {
     WifiScanning(bool),
     WifiScanned,
+    WifiSwitched(String),
     WifiInfo(Option<WifiInfo>),
     Vpn(Vec<VpnConnection>),
     VpnResult { name: String, result: Result<(), ConnectError> },

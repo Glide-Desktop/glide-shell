@@ -396,6 +396,7 @@ glide_app::catalogue! {
     QsScanBattery => "Fewer scans on battery", "Від батареї пошук рідше";
     QsScannedNowShort => "just now", "щойно";
     QsScannedAgoShort => "{n} s ago", "{n} с тому";
+    NetSwitchedToPreferred => "Wi-Fi switched to a preferred network", "Wi-Fi перемкнувся на пріоритетну мережу";
     QsConnectShort => "Connect", "Під\u{2019}єднатися";
     QsDisconnectShort => "Disconnect", "Від\u{2019}єднатися";
     QsPasswordPlaceholder => "Network password", "Пароль до мережі";

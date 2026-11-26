@@ -450,7 +450,82 @@ fn background_scan(kind: crate::wifi_scan::Background) {
             return;
         }
     }
-    request_wifi_scan();
+    if request_wifi_scan() && kind == Background::WhenIdle && AUTO_SWITCH.load(Ordering::Relaxed) {
+        std::thread::sleep(WIFI_SCAN_SETTLE);
+        switch_if_better();
+    }
+}
+
+pub static AUTO_SWITCH: AtomicBool = AtomicBool::new(true);
+static SWITCHER: Mutex<Option<crate::wifi_scan::Switcher>> = Mutex::new(None);
+static SSIDS: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+
+fn with_switcher<T>(f: impl FnOnce(&mut crate::wifi_scan::Switcher) -> T) -> T {
+    let mut switcher = SWITCHER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(switcher.get_or_insert_with(Default::default))
+}
+
+fn ssid_of(uuid: &str) -> Option<String> {
+    let mut cache = SSIDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache = cache.get_or_insert_with(Default::default);
+    if let Some(ssid) = cache.get(uuid) {
+        return Some(ssid.clone());
+    }
+    let ssid = stdout_of("nmcli", &["--escape", "no", "-g", "802-11-wireless.ssid", "con", "show", "uuid", uuid])?;
+    let ssid = ssid.trim_end_matches(['\r', '\n']).to_string();
+    (!ssid.is_empty()).then(|| {
+        cache.insert(uuid.to_string(), ssid.clone());
+        ssid
+    })
+}
+
+#[must_use]
+pub fn parse_known(text: &str, ssid_of: impl Fn(&str) -> Option<String>) -> Vec<crate::wifi_scan::Known> {
+    text.lines()
+        .filter_map(|line| {
+            let fields = split_terse(line);
+            let [uuid, kind, autoconnect, priority, active, ..] = fields.as_slice() else { return None };
+            if uuid.is_empty() || !matches!(kind.as_str(), "802-11-wireless" | "wifi") {
+                return None;
+            }
+            Some(crate::wifi_scan::Known {
+                ssid: ssid_of(uuid)?,
+                uuid: uuid.clone(),
+                autoconnect: autoconnect == "yes",
+                priority: priority.trim().parse().unwrap_or(0),
+                active: active == "yes",
+            })
+        })
+        .collect()
+}
+
+fn switch_if_better() {
+    let Some(text) =
+        stdout_of("nmcli", &["-t", "-f", "UUID,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY,ACTIVE", "con", "show"])
+    else {
+        return;
+    };
+    let known = parse_known(&text, ssid_of);
+    let Some(visible) = list_wifi() else { return };
+    let metered = crate::wifi_scan::wireless_interface()
+        .and_then(|interface| stdout_of("nmcli", &["-g", "GENERAL.METERED", "dev", "show", &interface]))
+        .is_some_and(|text| text.trim_start().starts_with("yes"));
+    let now = std::time::Instant::now();
+    let Some(target) = with_switcher(|switcher| switcher.decide(&known, &visible, metered, now)) else {
+        return;
+    };
+    tracing::info!(ssid = target.ssid, metered, priority = target.priority, "switching to a preferred wi-fi network");
+    WIFI_CONNECTING.fetch_add(1, Ordering::AcqRel);
+    let switched = run_with_timeout("nmcli", &["con", "up", "uuid", &target.uuid], WIFI_CONNECT_TIMEOUT)
+        .is_some_and(|output| output.status.success());
+    WIFI_CONNECTING.fetch_sub(1, Ordering::AcqRel);
+    if switched {
+        emit(NetEvent::WifiSwitched(target.ssid));
+    } else {
+        tracing::info!(ssid = target.ssid, "switching to the preferred wi-fi network failed");
+        with_switcher(|switcher| switcher.failed(&target.uuid, std::time::Instant::now()));
+    }
+    forget_saved_ssids();
 }
 
 fn run_request(request: NetRequest) {
@@ -486,6 +561,7 @@ fn run_request(request: NetRequest) {
         }
         NetRequest::ScanBluetooth => emit(NetEvent::Bluetooth(scan_bluetooth())),
         NetRequest::ConnectWifi { ssid, password, saved } => {
+            with_switcher(|switcher| switcher.hand_picked(std::time::Instant::now()));
             WIFI_CONNECTING.fetch_add(1, Ordering::AcqRel);
             let result = connect_wifi(&ssid, password.as_deref(), saved);
             WIFI_CONNECTING.fetch_sub(1, Ordering::AcqRel);
@@ -496,6 +572,7 @@ fn run_request(request: NetRequest) {
             emit_wifi();
         }
         NetRequest::DisconnectWifi { ssid } => {
+            with_switcher(|switcher| switcher.hand_picked(std::time::Instant::now()));
             let result = disconnect_wifi(&ssid);
             emit(NetEvent::WifiResult { ssid, result });
             emit_wifi();
@@ -789,6 +866,23 @@ pub(crate) fn open_settings_panel(slug: &str) {
 
 impl GlideState {
     pub fn handle_net_event(&mut self, event: NetEvent) {
+        if let NetEvent::WifiSwitched(ssid) = &event
+            && !self.screen_locked()
+        {
+            let icon = self
+                .dock
+                .icons
+                .load_named("network-wireless-signal-excellent", crate::notifications::ICON_SOURCE_PX)
+                .map(|bytes| std::sync::Arc::new(bytes.to_vec()));
+            let alert = crate::topbar::IslandAlert {
+                id: 0,
+                heading: ssid.clone(),
+                origin_device: String::new(),
+                summary: crate::i18n::t(crate::i18n::Key::NetSwitchedToPreferred).to_string(),
+                icon,
+            };
+            self.show_island_alert(alert);
+        }
         if self.topbar.apply_net_event(event) {
             self.queue_redraw();
         }
@@ -1217,6 +1311,15 @@ mod tests {
         }
         assert!(matches!(scan_for(Detail::Wifi), Some(NetRequest::RescanWifi)), "the page asks for a real scan");
         assert!(matches!(scan_for(Detail::Vpn), Some(NetRequest::ScanVpn)));
+    }
+
+    #[test]
+    fn saved_wifi_profiles_are_read_with_their_priority_and_state() {
+        let text = "u1:802-11-wireless:yes:0:yes\nu2:802-11-wireless:no:10:no\nu3:vpn:yes:5:no\nu4:802-11-wireless:yes:-3:no\n";
+        let known = parse_known(text, |uuid| (uuid != "u4").then(|| format!("ssid-{uuid}")));
+        assert_eq!(known.len(), 2, "vpn profiles and profiles without an SSID are left out");
+        assert!(known[0].active && known[0].autoconnect && known[0].priority == 0);
+        assert_eq!((known[1].ssid.as_str(), known[1].autoconnect, known[1].priority), ("ssid-u2", false, 10));
     }
 
     #[test]

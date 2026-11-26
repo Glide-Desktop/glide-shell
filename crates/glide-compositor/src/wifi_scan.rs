@@ -108,9 +108,145 @@ pub fn traffic_bytes(interface: &str) -> Option<u64> {
     Some(read("rx_bytes")? + read("tx_bytes")?)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Known {
+    pub uuid: String,
+    pub ssid: String,
+    pub autoconnect: bool,
+    pub priority: i32,
+    pub active: bool,
+}
+
+pub const SWITCH_SIGNAL: u8 = 60;
+pub const HAND_PICK_HOLD: Duration = Duration::from_mins(5);
+pub const FAILURE_HOLD: Duration = Duration::from_mins(10);
+
+#[derive(Debug, Default)]
+pub struct Switcher {
+    pending: Option<String>,
+    hand_picked: Option<Instant>,
+    failed: std::collections::HashMap<String, Instant>,
+    metered: std::collections::HashSet<String>,
+}
+
+impl Switcher {
+    pub fn hand_picked(&mut self, now: Instant) {
+        self.hand_picked = Some(now);
+        self.pending = None;
+    }
+
+    pub fn failed(&mut self, uuid: &str, now: Instant) {
+        self.failed.insert(uuid.to_string(), now);
+        self.pending = None;
+    }
+
+    pub fn decide(
+        &mut self, known: &[Known], visible: &[crate::qs_net::WifiNetwork], metered: bool, now: Instant,
+    ) -> Option<Known> {
+        let current = known.iter().find(|profile| profile.active)?;
+        if metered {
+            self.metered.insert(current.uuid.clone());
+        }
+        let held = self.hand_picked.is_some_and(|at| now.saturating_duration_since(at) < HAND_PICK_HOLD);
+        self.failed.retain(|_, at| now.saturating_duration_since(*at) < FAILURE_HOLD);
+        let signal =
+            |ssid: &str| visible.iter().find(|network| network.ssid == ssid).map_or(0, |network| network.signal);
+        let best = known
+            .iter()
+            .filter(|profile| profile.autoconnect && !profile.active && profile.ssid != current.ssid)
+            .filter(|profile| !self.metered.contains(&profile.uuid) && !self.failed.contains_key(&profile.uuid))
+            .filter(|profile| signal(&profile.ssid) >= SWITCH_SIGNAL)
+            .filter(|profile| profile.priority > current.priority || (metered && profile.priority == current.priority))
+            .max_by_key(|profile| (profile.priority, signal(&profile.ssid)))
+            .filter(|_| !held);
+        let Some(best) = best else {
+            self.pending = None;
+            return None;
+        };
+        if self.pending.as_deref() == Some(&best.uuid) {
+            self.pending = None;
+            return Some(best.clone());
+        }
+        self.pending = Some(best.uuid.clone());
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn known(ssid: &str, priority: i32, active: bool) -> Known {
+        Known { uuid: format!("{ssid}-uuid"), ssid: ssid.into(), autoconnect: true, priority, active }
+    }
+
+    fn seen(ssid: &str, signal: u8) -> crate::qs_net::WifiNetwork {
+        crate::qs_net::WifiNetwork {
+            ssid: ssid.into(),
+            security: crate::qs_net::Security::Passphrase,
+            signal,
+            connected: false,
+            saved: true,
+        }
+    }
+
+    #[test]
+    fn a_metered_hotspot_gives_way_to_a_strong_home_network_after_two_scans() {
+        let start = Instant::now();
+        let mut switcher = Switcher::default();
+        let profiles = [known("Pixel", 0, true), known("Home", 0, false)];
+        let visible = [seen("Pixel", 90), seen("Home", 75)];
+        assert_eq!(switcher.decide(&profiles, &visible, true, start), None, "one sighting is not enough");
+        let picked = switcher.decide(&profiles, &visible, true, at(start, 20)).expect("switches on the second");
+        assert_eq!(picked.ssid, "Home");
+        assert_eq!(switcher.decide(&profiles, &visible, false, at(start, 40)), None, "an unmetered link stays put");
+    }
+
+    #[test]
+    fn weak_failed_hand_picked_and_metered_candidates_are_left_alone() {
+        let start = Instant::now();
+        let profiles = [known("Pixel", 0, true), known("Home", 0, false)];
+        let weak = [seen("Home", 40)];
+        let mut switcher = Switcher::default();
+        for step in 0..3 {
+            assert_eq!(switcher.decide(&profiles, &weak, true, at(start, step * 20)), None, "too weak");
+        }
+        let strong = [seen("Home", 80)];
+        let mut switcher = Switcher::default();
+        switcher.hand_picked(start);
+        for step in 0..3 {
+            assert_eq!(switcher.decide(&profiles, &strong, true, at(start, step * 20)), None, "the user chose it");
+        }
+        assert_eq!(switcher.decide(&profiles, &strong, true, at(start, 301)), None);
+        assert!(switcher.decide(&profiles, &strong, true, at(start, 321)).is_some(), "five minutes later it may");
+        let mut switcher = Switcher::default();
+        switcher.failed("Home-uuid", start);
+        assert_eq!(switcher.decide(&profiles, &strong, true, at(start, 20)), None);
+        assert_eq!(switcher.decide(&profiles, &strong, true, at(start, 40)), None, "a failure holds it back");
+        let mut switcher = Switcher::default();
+        let flipped = [known("Pixel", 0, false), known("Home", 0, true)];
+        switcher.decide(&flipped, &[seen("Pixel", 90)], true, start);
+        assert_eq!(switcher.decide(&profiles, &strong, true, at(start, 20)), None);
+        assert_eq!(
+            switcher.decide(&profiles, &[seen("Home", 90)], true, at(start, 40)),
+            None,
+            "a network once seen metered is never a way out of another metered one"
+        );
+    }
+
+    #[test]
+    fn a_higher_priority_wins_even_on_an_unmetered_link() {
+        let start = Instant::now();
+        let mut switcher = Switcher::default();
+        let profiles = [known("Cafe", 0, true), known("Office", 10, false), known("Lower", -5, false)];
+        let visible = [seen("Office", 70), seen("Lower", 99)];
+        switcher.decide(&profiles, &visible, false, start);
+        assert_eq!(switcher.decide(&profiles, &visible, false, at(start, 20)).map(|k| k.ssid), Some("Office".into()));
+        let mut switcher = Switcher::default();
+        let off = [known("Cafe", 0, true), Known { autoconnect: false, ..known("Office", 10, false) }];
+        switcher.decide(&off, &visible, false, start);
+        assert_eq!(switcher.decide(&off, &visible, false, at(start, 20)), None, "autoconnect off means hands off");
+    }
 
     fn at(start: Instant, secs: u64) -> Instant {
         start + Duration::from_secs(secs)

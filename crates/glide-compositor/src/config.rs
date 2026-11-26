@@ -772,12 +772,14 @@ pub fn pin_identity_for_app_id(app_id: &str) -> Option<(String, String)> {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+#[allow(clippy::struct_excessive_bools)] // Independent [general] switches mirrored from the settings store
 pub struct GeneralConfig {
     pub background: Color,
     pub autostart: Vec<String>,
     pub xdg_autostart: bool,
     pub polkit_agent: bool,
     pub pause_media_on_disconnect: bool,
+    pub switch_to_preferred_networks: bool,
     pub wallpaper: Option<PathBuf>,
     pub wallpaper_fit: WallpaperFit,
     pub font_family: Option<String>,
@@ -811,6 +813,7 @@ impl Default for GeneralConfig {
             xdg_autostart: true,
             polkit_agent: true,
             pause_media_on_disconnect: true,
+            switch_to_preferred_networks: true,
             wallpaper: None,
             wallpaper_fit: WallpaperFit::default(),
             font_family: None,
@@ -1198,6 +1201,8 @@ impl Config {
         state.session.config = self.clone();
         state.session.appearance_schedule = self.topbar.appearance_schedule;
         state.session.headset.pause_on_unplug = self.general.pause_media_on_disconnect;
+        crate::qs_net::AUTO_SWITCH
+            .store(self.general.switch_to_preferred_networks, std::sync::atomic::Ordering::Relaxed);
         state.session.face_unlock.config = self.facekey.clone();
         state.motion = crate::state::MotionPolicy {
             configured_scale: self.animations.motion_scale(),
