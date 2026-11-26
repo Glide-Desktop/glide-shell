@@ -152,7 +152,9 @@ Every QS page whose content is taller than 640 px scrolls by pixels
 header, the body cropped at the scroll offset, the footer — so a scroll
 changes only the crop, never the raster key. A finger on the touchpad moves
 it 1:1; a wheel notch moves two rows over a t2 `E_OUT` tween retargeted from
-where it is drawn; lifting the fingers stops it (no coasting). Hit slots are
+where it is drawn; after the fingers lift the compositor's touchpad momentum
+(`momentum.rs`, `[input] touchpad-momentum`) keeps feeding it finger deltas
+until it comes to rest, the same tail every client gets. Hit slots are
 laid out at the target offset and clipped to the body; spinners, the sweep,
 the mic meter / slider and the shaking field are shifted with the content and
 drawn only for rows wholly on screen; the 3 px thumb is its own cached
@@ -162,8 +164,9 @@ line scrolls away with the rows. Lists are capped at 30 rows.
 A scroll clears a row's hover (it comes back with the next pointer motion), so
 the highlight does not ride away with the rows.
 
-Not done: an edge fade (rows are cut hard at the body's edges), coasting after
-the fingers lift, and keyboard focus cannot reach rows below the fold. The
+Not done: an edge fade (rows are cut hard at the body's edges), a rubber band
+at the ends (left out on purpose), and keyboard focus cannot reach rows below
+the fold. The
 "updated N s ago" tick re-rasters the page once a second, now up to its full
 content height (30 rows at most). The composited scroll has not been seen on
 hardware; `push_placed_from` was checked by reading only (it crops the source
