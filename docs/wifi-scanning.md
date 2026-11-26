@@ -1,7 +1,7 @@
 # Wi-Fi scanning, switching between known networks, captive portals
 
 Plan of 2026-11-26. Built in glide-shell and glide-settings; not run live.
-Left: pixel scrolling (§5) and whether a phone hotspot reads as metered (§3).
+Left: whether a phone hotspot reads as metered (§3) and the gaps listed in §5.
 
 ## Findings
 
@@ -142,11 +142,21 @@ across restarts was not checked — its state file is root-only).
   network" that opens the default browser on `http://<gateway>` (what worked
   live on 2026-11-26), then `CheckConnectivity` once the page is closed or after a timeout.
 
-## 5. QS list scrolling — a thumb is done
+## 5. QS page scrolling — done
 
-The Wi-Fi, Bluetooth and Sound lists already scrolled by wheel and touchpad,
-one row per step; nothing showed that more rows existed. They now draw the
-notification centre's 3 px thumb in the right gutter (`panels::list_thumb`)
-whenever rows are hidden above or below. Pixel scrolling (a page raster
-cropped by an animated offset, with an edge fade) is not built: it reworks
-the page raster pipeline and could not be seen from a headless machine.
+Every QS page whose content is taller than 640 px scrolls by pixels
+(`panels::Page`). The page is rastered once at its full content height
+(header, all rows, footer at the bottom) and placed as three bands: the
+header, the body cropped at the scroll offset, the footer — so a scroll
+changes only the crop, never the raster key. A finger on the touchpad moves
+it 1:1; a wheel notch moves two rows over a t2 `E_OUT` tween retargeted from
+where it is drawn; lifting the fingers stops it (no coasting). Hit slots are
+laid out at the target offset and clipped to the body; spinners, the sweep,
+the mic meter / slider and the shaking field are shifted with the content and
+drawn only for rows wholly on screen; the 3 px thumb is its own cached
+element. Opening a password or details drawer scrolls it into view. The scan
+line scrolls away with the rows. Lists are capped at 30 rows.
+
+Not done: an edge fade (rows are cut hard at the body's edges), hover follows
+the pointer only after it moves again, and keyboard focus cannot reach rows
+below the fold. The composited scroll has not been seen on hardware.

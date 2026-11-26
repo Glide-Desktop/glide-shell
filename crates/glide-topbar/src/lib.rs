@@ -906,6 +906,7 @@ pub struct Topbar {
     qs_bg_cache: Cache<(i32, i32)>,
     qs_sliders: HashMap<SliderKey, MemoryRenderBuffer>,
     qs_detail_cache: Cache<panels::DetailKey>,
+    qs_thumb_cache: Cache<i32>,
     headset_cache: Cache<headset_view::HeadsetKey>,
     phone_cache: Cache<phone_view::PhoneKey>,
     passwords: passwords_view::Applet,
@@ -1012,6 +1013,7 @@ impl Topbar {
         self.qs_tip.clear();
         self.qs_sliders.clear();
         self.qs_detail_cache.clear();
+        self.qs_thumb_cache.clear();
         self.headset_cache.clear();
         self.phone_cache.clear();
         self.passwords_cache.clear();
@@ -7001,10 +7003,36 @@ mod tests {
                     saved: n < 3,
                 };
                 bar.apply_net_event(crate::qs_net::NetEvent::Wifi((0..16).map(net).collect()));
-                bar.scroll_detail_list(4);
+                panels::settle_scroll(bar, None);
+                bar.scroll_detail_by(crate::system_info::ScrollDelta::Continuous(170.0));
+            }
+            "-many-prompt" => {
+                preview_variant(bar, "-many");
+                bar.toggle_prompt("Мережа 15");
             }
             _ => {}
         }
+    }
+
+    fn preview_page(
+        bar: &mut Topbar, ctx: &QsRenderContext<'_>, icons: &mut crate::icon::IconLoader, page: Detail,
+    ) -> Canvas<'static> {
+        let theme = ctx.theme;
+        let offset = panels::settle_scroll(bar, Some(ctx.painter));
+        let layout = bar.page(Some(ctx.painter), page);
+        let mut raster = Canvas::popover((QS_WIDTH, layout.raster), 2, R3, theme.popover_bg, theme.line)
+            .expect("canvas")
+            .with_icons(Some(icons));
+        let status = bar.system_status().clone();
+        panels::draw_detail(&mut raster, ctx, &bar.qs_panel, page, &status, 1.0);
+        panels::draw_layered_sliders(&mut raster, ctx, (&bar.qs_panel, page, layout.raster), &status);
+        let mut canvas =
+            Canvas::popover((QS_WIDTH, layout.height), 2, R3, theme.popover_bg, theme.line).expect("canvas");
+        panels::compose_bands(&raster, &mut canvas, &layout, offset);
+        if let Some(thumb) = layout.thumb(offset, QS_WIDTH) {
+            canvas.fill(thumb, theme.track, R_ROUND);
+        }
+        canvas
     }
 
     fn preview_lists(bar: &mut Topbar) {
@@ -7128,6 +7156,7 @@ mod tests {
                     (Detail::Wifi, None, "-password"),
                     (Detail::Wifi, None, "-battery"),
                     (Detail::Wifi, None, "-many"),
+                    (Detail::Wifi, None, "-many-prompt"),
                     (Detail::Bluetooth, None, ""),
                     (Detail::Vpn, None, ""),
                 ] {
@@ -7136,13 +7165,7 @@ mod tests {
                         bar.arm_power(action, vec!["Firefox".into(), "Files".into(), "Terminal".into()]);
                     }
                     preview_variant(&mut bar, variant);
-                    let height = bar.page_height(Some(&painter), page);
-                    let mut canvas = Canvas::popover((QS_WIDTH, height), 2, R3, theme.popover_bg, theme.line)
-                        .expect("canvas")
-                        .with_icons(Some(&mut icons));
-                    let status = bar.system_status().clone();
-                    panels::draw_detail(&mut canvas, &ctx, &bar.qs_panel, page, &status, 1.0);
-                    panels::draw_layered_sliders(&mut canvas, &ctx, (&bar.qs_panel, page, height), &status);
+                    let canvas = preview_page(&mut bar, &ctx, &mut icons, page);
                     save(&canvas, format!("qs-page-{page:?}{variant}-{appearance:?}.png"));
                     bar.close_detail();
                 }

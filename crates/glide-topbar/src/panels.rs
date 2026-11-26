@@ -428,8 +428,9 @@ pub(super) struct DetailPanel {
     pub(super) headset_batteries: Vec<(String, u8)>,
     accordion: Accordion,
     pub(super) radio_pending: Option<(Radio, std::time::Instant)>,
-    sound_scroll: usize,
-    list_scroll: usize,
+    scroll: super::Anim,
+    overflow: i32,
+    revealed: Option<ItemKind>,
     pending: Option<Pending>,
     failure: Option<Failure>,
     prompt: Option<Prompt>,
@@ -467,7 +468,15 @@ impl DetailPanel {
     }
 
     pub(super) fn is_animating(&self) -> bool {
-        self.slide.is_animating() || self.spinning() || self.accordion.is_animating()
+        self.slide.is_animating() || self.spinning() || self.accordion.is_animating() || self.scroll.is_animating()
+    }
+
+    fn drawn_offset(&self) -> i32 {
+        (self.scroll.value().round() as i32).clamp(0, self.overflow.max(0))
+    }
+
+    fn target_offset(&self) -> i32 {
+        (self.scroll.target().round() as i32).clamp(0, self.overflow.max(0))
     }
 
     fn spinning(&self) -> bool {
@@ -812,6 +821,8 @@ fn rescan_rect(section: LocalRect) -> LocalRect {
     local_rect(x, section.loc.y + (section.size.h - RESCAN) / 2, RESCAN, RESCAN)
 }
 const PAGE_PROBE: i32 = 4096;
+const MAX_LIST_ROWS: usize = 30;
+const WHEEL_NOTCH: f64 = 2.0 * (DETAIL_CARD + DETAIL_CARD_GAP) as f64;
 
 fn wifi_items(
     column: &mut Column<'_>, panel: &DetailPanel, status: &crate::system_info::SystemStatus,
@@ -861,8 +872,7 @@ fn wifi_list(
     }
     let (connected, available): (Vec<usize>, Vec<usize>) =
         (0..panel.wifi.len()).partition(|index| panel.wifi[*index].connected);
-    let skipped = panel.list_scroll.min(panel.wifi.len().saturating_sub(1));
-    for index in connected.into_iter().chain(available).skip(skipped) {
+    for index in connected.into_iter().chain(available).take(MAX_LIST_ROWS) {
         if !push_network(column, panel, index) {
             return;
         }
@@ -888,8 +898,7 @@ fn bluetooth_items(
     }
     let (connected, paired): (Vec<usize>, Vec<usize>) =
         (0..panel.devices.len()).partition(|index| panel.devices[*index].connected);
-    let skipped = panel.list_scroll.min(panel.devices.len().saturating_sub(1));
-    for index in connected.into_iter().chain(paired).skip(skipped) {
+    for index in connected.into_iter().chain(paired).take(MAX_LIST_ROWS) {
         if !column.card(ItemKind::Device(index), row_slot(index)) {
             return;
         }
@@ -897,25 +906,19 @@ fn bluetooth_items(
 }
 
 fn sound_items(column: &mut Column<'_>, panel: &DetailPanel, (mic, live): (bool, bool)) {
-    let count = panel.outputs.len() + panel.inputs.as_ref().map_or(0, Vec::len);
-    let mut skipped = panel.sound_scroll.min(count.saturating_sub(1));
     let groups = [
         (Key::QsOutputSection, super::Drawer::Output, Key::QsNoOutputs),
         (Key::QsInputSection, super::Drawer::Input, Key::QsNoInputs),
     ];
     for (section, drawer, empty) in groups {
         let devices = panel.devices(drawer);
-        if skipped >= devices.len() && !devices.is_empty() {
-            skipped -= devices.len();
-            continue;
-        }
         if !column.section(section) {
             return;
         }
         if devices.is_empty() {
             column.message(if panel.devices_ready(drawer) { empty } else { Key::QsSearching });
         }
-        for index in skipped..devices.len() {
+        for index in 0..devices.len().min(MAX_LIST_ROWS) {
             let (kind, slot) = match drawer {
                 super::Drawer::Output => (ItemKind::Output(index), row_slot(index)),
                 super::Drawer::Input => {
@@ -926,7 +929,6 @@ fn sound_items(column: &mut Column<'_>, panel: &DetailPanel, (mic, live): (bool,
                 return;
             }
         }
-        skipped = 0;
         column.end_group();
     }
     if mic {
@@ -1063,36 +1065,27 @@ const fn has_link(detail: Detail) -> bool {
 }
 
 impl Topbar {
-    pub fn scroll_detail_list(&mut self, steps: i32) -> bool {
-        let count = match self.detail() {
-            Some(Detail::Sound) => return self.scroll_sound_devices(steps),
-            Some(Detail::Wifi) if self.qs_panel.prompt.is_none() => self.qs_panel.wifi.len(),
-            Some(Detail::Bluetooth) => self.qs_panel.devices.len(),
-            _ => return false,
-        };
-        let current = self.qs_panel.list_scroll.min(count.saturating_sub(1));
-        let next = current.saturating_add_signed(steps as isize).min(count.saturating_sub(1));
-        if next == self.qs_panel.list_scroll {
+    pub fn scroll_detail_by(&mut self, delta: crate::system_info::ScrollDelta) -> bool {
+        use crate::system_info::ScrollDelta;
+        let panel = &mut self.qs_panel;
+        if panel.view.is_none() || panel.overflow <= 0 {
             return false;
         }
-        self.qs_panel.list_scroll = next;
-        self.qs_panel.bump();
-        self.touch();
-        true
-    }
-
-    pub fn scroll_sound_devices(&mut self, steps: i32) -> bool {
-        if self.detail() != Some(Detail::Sound) {
+        let limit = f64::from(panel.overflow);
+        let before = panel.scroll.target();
+        match delta {
+            ScrollDelta::Wheel(v120) => {
+                let to = (before + v120 / 120.0 * WHEEL_NOTCH).clamp(0.0, limit);
+                panel.scroll.retarget(to, motion::t2(), E_OUT);
+            }
+            ScrollDelta::Continuous(distance) => {
+                panel.scroll.jump((panel.scroll.value() + distance).clamp(0.0, limit));
+            }
+            ScrollDelta::Stop => return false,
+        }
+        if (panel.scroll.target() - before).abs() < f64::EPSILON {
             return false;
         }
-        let count = self.qs_panel.outputs.len() + self.qs_panel.inputs.as_ref().map_or(0, Vec::len);
-        let current = self.qs_panel.sound_scroll.min(count.saturating_sub(1));
-        let next = current.saturating_add_signed(steps as isize).min(count.saturating_sub(1));
-        if next == self.qs_panel.sound_scroll {
-            return false;
-        }
-        self.qs_panel.sound_scroll = next;
-        self.qs_panel.bump();
         self.touch();
         true
     }
@@ -1118,8 +1111,8 @@ impl Topbar {
             .map(|(slot, popup)| Rectangle::new(slot.loc - popup.loc, slot.size));
         self.qs_panel.opener = Some(opener);
         self.qs_panel.view = Some(detail);
-        self.qs_panel.sound_scroll = 0;
-        self.qs_panel.list_scroll = 0;
+        self.qs_panel.scroll = super::Anim::default();
+        self.qs_panel.revealed = None;
         self.qs_panel.shown = Some(detail);
         self.qs_panel.slide.retarget(1.0, motion::t3(), E_OUT);
         self.qs_panel.prompt = None;
@@ -1492,42 +1485,54 @@ impl Topbar {
     }
 
     pub(super) fn page_height(&self, painter: Option<&crate::paint::Painter>, detail: Detail) -> i32 {
+        self.page(painter, detail).height
+    }
+
+    pub(super) fn page(&self, painter: Option<&crate::paint::Painter>, detail: Detail) -> Page {
         let probe = detail_geometry(PAGE_PROBE, has_radio(detail), has_link(detail));
         let items = detail_items(&self.qs_panel, detail, &self.system_status, probe.body, painter);
         let bottom = items.iter().map(|item| item.rect.loc.y + item.rect.size.h).max().unwrap_or(probe.body.loc.y);
         let below = PAGE_PROBE - (probe.body.loc.y + probe.body.size.h);
-        (bottom + below).min(super::QS_PAGE_MAX)
+        Page::new(bottom + below, super::QS_PAGE_MAX, detail)
     }
 
     pub(super) fn detail_slots(&self, painter: &crate::paint::Painter) -> Option<(i32, Vec<(Slot, LocalRect)>)> {
         let detail = self.qs_panel.view?;
         let radio = has_radio(detail);
-        let height = self.page_height(Some(painter), detail);
+        let page = self.page(Some(painter), detail);
+        let height = page.height;
         let geometry = detail_geometry(height, radio, has_link(detail));
         let mut slots = vec![(Slot::QsBack, geometry.back)];
         if radio {
             slots.push((Slot::QsDetailToggle, geometry.toggle));
         }
-        for item in detail_items(&self.qs_panel, detail, &self.system_status, geometry.body, Some(painter)) {
+        let content = detail_items(&self.qs_panel, detail, &self.system_status, page.content_body(), Some(painter));
+        let offset = (self.qs_panel.scroll.target().round() as i32).clamp(0, page.overflow);
+        let mut push = |slot: Slot, rect: LocalRect| {
+            if let Some(rect) = page.on_screen(rect, offset) {
+                slots.push((slot, rect));
+            }
+        };
+        for item in content {
             if let Some(slot) = item.slot {
-                slots.push((slot, item.rect));
+                push(slot, item.rect);
             }
             if let ItemKind::Prompt(index) = item.kind {
                 let parts = prompt_parts(item.rect, self.qs_panel.failed(index), prompt_pills(painter));
-                slots.push((Slot::QsPromptReveal, parts.reveal));
-                slots.push((Slot::QsPasswordField, parts.field));
-                slots.push((Slot::QsPromptCancel, parts.cancel));
-                slots.push((Slot::QsPromptConnect, parts.connect));
+                push(Slot::QsPromptReveal, parts.reveal);
+                push(Slot::QsPasswordField, parts.field);
+                push(Slot::QsPromptCancel, parts.cancel);
+                push(Slot::QsPromptConnect, parts.connect);
             }
             if let ItemKind::Info(_) = item.kind {
                 let parts = info_parts(item.rect, info_pills(painter));
-                slots.push((Slot::QsNetForget, parts.forget));
-                slots.push((Slot::QsNetDisconnect, parts.disconnect));
+                push(Slot::QsNetForget, parts.forget);
+                push(Slot::QsNetDisconnect, parts.disconnect);
             }
             if let ItemKind::PowerConfirm(action) = item.kind {
                 let (cancel, confirm) = confirm_buttons(painter, item.rect, action);
-                slots.push((Slot::QsPowerCancel, cancel));
-                slots.push((Slot::QsPowerConfirm(action), confirm));
+                push(Slot::QsPowerCancel, cancel);
+                push(Slot::QsPowerConfirm(action), confirm);
             }
         }
         if has_link(detail) {
@@ -1573,16 +1578,17 @@ pub(super) fn push_detail<R>(
         .filter(|slot| topbar.qs_panel.view.is_some() && *slot != Slot::QsMicTrack);
     let profile = super::quantize(topbar.profile_anim.value(), super::MOTION_QUANTUM);
     let revs = (topbar.qs_panel.rev, topbar.detail_rev, topbar.qs_rev);
-    let height = topbar.page_height(Some(painter), detail);
+    let page = topbar.page(Some(painter), detail);
+    let (height, raster) = (page.height, page.raster);
     let shaking = topbar.qs_panel.accordion.shaking();
-    let key: DetailKey = (revs, hovered, detail, (height, shaking), profile);
+    let key: DetailKey = (revs, hovered, detail, (raster, shaking), profile);
     let theme = &topbar.theme;
     let status = &topbar.system_status;
     let panel = &topbar.qs_panel;
     let Some(buffer) = topbar.qs_detail_cache.resolve(key, output_scale, || {
         let ctx = QsRenderContext { painter, theme, hovered };
-        let mut canvas = Canvas::new(rect.size.w, height, output_scale)?.with_icons(Some(icons));
-        let inner = local_rect(1, 1, rect.size.w - 2, height - 2);
+        let mut canvas = Canvas::new(rect.size.w, raster, output_scale)?.with_icons(Some(icons));
+        let inner = local_rect(1, 1, rect.size.w - 2, raster - 2);
         canvas.fill(inner, theme.popover_bg, super::QS_RADIUS - 1.0);
         let position = f64::from(profile) / super::MOTION_QUANTUM;
         draw_detail(&mut canvas, &ctx, panel, detail, status, position);
@@ -1596,13 +1602,20 @@ pub(super) fn push_detail<R>(
     if clip.size.w <= 0 || clip.size.h <= 0 {
         return;
     }
-    let body = detail_geometry(height, has_radio(detail), has_link(detail)).body;
-    let items = detail_items(&topbar.qs_panel, detail, &topbar.system_status, body, Some(painter));
-    let open = items
-        .iter()
-        .find(|item| matches!(item.kind, ItemKind::Prompt(_) | ItemKind::Info(_) | ItemKind::PowerConfirm(_)))
-        .map(|item| (item.kind, item.rect.loc.y, item.rect.size.h));
+    let content = detail_items(&topbar.qs_panel, detail, &topbar.system_status, page.content_body(), Some(painter));
+    let open = open_item(&content);
     topbar.qs_panel.accordion.follow(open);
+    follow_scroll(&mut topbar.qs_panel, &page, open);
+    let offset = topbar.qs_panel.drawn_offset();
+    let items: Vec<DetailItem> = content
+        .iter()
+        .filter_map(|item| {
+            page.wholly_on_screen(item.rect, offset).map(|rect| DetailItem { kind: item.kind, rect, slot: item.slot })
+        })
+        .collect();
+    if let Some(thumb) = page.thumb(offset, rect.size.w) {
+        push_thumb(topbar, renderer, (rect, thumb, clip, reveal), (scale, output_scale), elements);
+    }
     if let Some(meter) =
         items.iter().find(|item| item.kind == ItemKind::Meter).filter(|item| clip.contains(item.rect.loc))
     {
@@ -1619,8 +1632,11 @@ pub(super) fn push_detail<R>(
     if shaking && let Some(prompt) = items.iter().find(|item| matches!(item.kind, ItemKind::Prompt(_))) {
         push_shaking_field(topbar, renderer, painter, (rect, prompt), (scale, output_scale), elements);
     }
-    let bands =
-        if slide >= 1.0 { accordion_bands(&topbar.qs_panel.accordion, height) } else { vec![(0, 0, height, 1.0)] };
+    let bands = match page.bands(offset) {
+        Some(bands) => bands.iter().map(|&(src, dst, h)| (src, dst, h, 1.0)).collect(),
+        None if slide >= 1.0 => accordion_bands(&topbar.qs_panel.accordion, height),
+        None => vec![(0, 0, height, 1.0)],
+    };
     for (src_y, dst_y, band_h, alpha) in bands {
         let top = dst_y.max(clip.loc.y);
         let bottom = (dst_y + band_h).min(clip.loc.y + clip.size.h);
@@ -1635,6 +1651,87 @@ pub(super) fn push_detail<R>(
         let placed = Placed { popup: rect, element, progress: reveal, alpha };
         super::push_placed_from(renderer, &buffer, placed, Some(origin), scale, elements);
     }
+}
+
+fn open_item(items: &[DetailItem]) -> Option<(ItemKind, i32, i32)> {
+    items
+        .iter()
+        .find(|item| matches!(item.kind, ItemKind::Prompt(_) | ItemKind::Info(_) | ItemKind::PowerConfirm(_)))
+        .map(|item| (item.kind, item.rect.loc.y, item.rect.size.h))
+}
+
+#[cfg(test)]
+pub(super) fn settle_scroll(topbar: &mut Topbar, painter: Option<&crate::paint::Painter>) -> i32 {
+    let Some(detail) = topbar.qs_panel.view else { return 0 };
+    let page = topbar.page(painter, detail);
+    let content = detail_items(&topbar.qs_panel, detail, &topbar.system_status, page.content_body(), painter);
+    follow_scroll(&mut topbar.qs_panel, &page, open_item(&content));
+    let target = topbar.qs_panel.scroll.target();
+    topbar.qs_panel.scroll.jump(target);
+    topbar.qs_panel.drawn_offset()
+}
+
+#[cfg(test)]
+pub(super) fn compose_bands(raster: &Canvas<'_>, page_canvas: &mut Canvas<'_>, page: &Page, offset: i32) {
+    let bands = page.bands(offset).map_or_else(|| vec![(0, 0, page.height)], |bands| bands.to_vec());
+    let stride = (raster.w * raster.scale * 4) as usize;
+    for (src, dst, height) in bands {
+        let rows = |y: i32| (y * raster.scale) as usize * stride;
+        page_canvas.buf[rows(dst)..rows(dst + height)].copy_from_slice(&raster.buf[rows(src)..rows(src + height)]);
+    }
+}
+
+fn follow_scroll(panel: &mut DetailPanel, page: &Page, open: Option<(ItemKind, i32, i32)>) {
+    panel.overflow = page.overflow;
+    if panel.scroll.target() > f64::from(page.overflow) {
+        panel.scroll.jump(f64::from(page.overflow));
+    }
+    let kind = open.map(|(kind, ..)| kind);
+    if panel.revealed == kind {
+        return;
+    }
+    panel.revealed = kind;
+    let Some((_, y, h)) = open else { return };
+    let (top, viewport) = (y - page.content_body().loc.y, page.body.size.h);
+    let offset = panel.target_offset();
+    let target = if top + h > offset + viewport {
+        top + h - viewport
+    } else if top < offset {
+        top
+    } else {
+        offset
+    };
+    if target != offset {
+        panel.scroll.retarget(f64::from(target.clamp(0, page.overflow)), motion::t2(), E_OUT);
+    }
+}
+
+fn push_thumb<R>(
+    topbar: &mut Topbar, renderer: &mut R,
+    (rect, thumb, clip, reveal): (Rectangle<i32, Logical>, LocalRect, LocalRect, f64),
+    (scale, output_scale): (Scale<f64>, i32), elements: &mut Vec<MemoryRenderBufferRenderElement<R>>,
+) where
+    R: crate::raster::ShellRenderer,
+{
+    if !clip.contains(thumb.loc) {
+        return;
+    }
+    let colour = topbar.theme.track;
+    let Some(buffer) = topbar.qs_thumb_cache.resolve(thumb.size.h, output_scale, || {
+        let mut canvas = Canvas::new(thumb.size.w, thumb.size.h, output_scale)?;
+        canvas.fill(local_rect(0, 0, thumb.size.w, thumb.size.h), colour, R_ROUND);
+        Some(canvas.finish())
+    }) else {
+        return;
+    };
+    let element = Rectangle::new(rect.loc + thumb.loc, thumb.size);
+    super::push_placed(
+        renderer,
+        buffer,
+        Placed { popup: rect, element, progress: reveal, alpha: 1.0 },
+        scale,
+        elements,
+    );
 }
 
 fn accordion_bands(accordion: &Accordion, height: i32) -> Vec<(i32, i32, i32, f32)> {
@@ -1795,11 +1892,7 @@ pub(super) fn draw_detail(
     let geometry = detail_geometry(c.h, has_radio(detail), has_link(detail));
     draw_detail_header(c, ctx, &geometry, detail, (panel, status));
 
-    let items = detail_items(panel, detail, status, geometry.body, Some(ctx.painter));
-    if let Some(thumb) = list_thumb(panel, detail, &items, c.w) {
-        c.fill(thumb, ctx.theme.track, R_ROUND);
-    }
-    for item in items {
+    for item in detail_items(panel, detail, status, geometry.body, Some(ctx.painter)) {
         draw_item(c, ctx, (panel, status, profile), item);
     }
 
@@ -1834,32 +1927,56 @@ pub(super) fn draw_detail(
 
 const LIST_THUMB_W: i32 = 3;
 
-fn list_thumb(panel: &DetailPanel, detail: Detail, items: &[DetailItem], width: i32) -> Option<LocalRect> {
-    let (scroll, total) = match detail {
-        Detail::Wifi => (panel.list_scroll, panel.wifi.len()),
-        Detail::Bluetooth => (panel.list_scroll, panel.devices.len()),
-        Detail::Sound => (panel.sound_scroll, panel.outputs.len() + panel.inputs.as_ref().map_or(0, Vec::len)),
-        Detail::Vpn | Detail::Battery | Detail::Power => return None,
-    };
-    let rows: Vec<LocalRect> = items
-        .iter()
-        .filter(|item| {
-            matches!(item.kind, ItemKind::Network(_) | ItemKind::Device(_) | ItemKind::Output(_) | ItemKind::Input(_))
-        })
-        .map(|item| item.rect)
-        .collect();
-    let first = scroll.min(total.saturating_sub(1));
-    let (top, last) = (rows.first()?, rows.last()?);
-    if first == 0 && rows.len() >= total {
-        return None;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Page {
+    pub(super) height: i32,
+    pub(super) raster: i32,
+    pub(super) overflow: i32,
+    pub(super) body: LocalRect,
+    content: LocalRect,
+}
+
+impl Page {
+    pub(super) fn new(full: i32, max: i32, detail: Detail) -> Self {
+        let height = full.min(max);
+        let raster = full.max(height);
+        let geometry = |h| detail_geometry(h, has_radio(detail), has_link(detail)).body;
+        Self { height, raster, overflow: raster - height, body: geometry(height), content: geometry(raster) }
     }
-    let track = last.loc.y + last.size.h - top.loc.y;
-    let shown = rows.len().min(total) as i32;
-    let thumb = (track * shown / total as i32).max(glide_theme::spacing::SP4).min(track);
-    let hidden = (total as i32 - shown).max(1);
-    let offset = (track - thumb) * (first as i32).min(hidden) / hidden;
-    let x = width - super::QS_PAD / 2 - LIST_THUMB_W / 2;
-    Some(local_rect(x, top.loc.y + offset, LIST_THUMB_W, thumb))
+
+    pub(super) const fn content_body(&self) -> LocalRect {
+        self.content
+    }
+
+    pub(super) fn on_screen(&self, rect: LocalRect, offset: i32) -> Option<LocalRect> {
+        let top = (rect.loc.y - offset).max(self.body.loc.y);
+        let bottom = (rect.loc.y + rect.size.h - offset).min(self.body.loc.y + self.body.size.h);
+        (bottom > top).then(|| local_rect(rect.loc.x, top, rect.size.w, bottom - top))
+    }
+
+    pub(super) fn wholly_on_screen(&self, rect: LocalRect, offset: i32) -> Option<LocalRect> {
+        self.on_screen(rect, offset).filter(|shown| shown.size.h == rect.size.h)
+    }
+
+    pub(super) fn bands(&self, offset: i32) -> Option<[(i32, i32, i32); 3]> {
+        if self.overflow <= 0 {
+            return None;
+        }
+        let offset = offset.clamp(0, self.overflow);
+        let (top, viewport) = (self.body.loc.y, self.body.size.h);
+        let below = self.height - top - viewport;
+        Some([(0, 0, top), (top + offset, top, viewport), (top + viewport + self.overflow, top + viewport, below)])
+    }
+
+    pub(super) fn thumb(&self, offset: i32, width: i32) -> Option<LocalRect> {
+        if self.overflow <= 0 || self.body.size.h <= 0 {
+            return None;
+        }
+        let track = self.body.size.h;
+        let thumb = (track * track / (track + self.overflow)).max(glide_theme::spacing::SP4).min(track);
+        let y = self.body.loc.y + (track - thumb) * offset.clamp(0, self.overflow) / self.overflow;
+        Some(local_rect(width - super::QS_PAD / 2 - LIST_THUMB_W / 2, y, LIST_THUMB_W, thumb))
+    }
 }
 
 fn draw_item(
@@ -2748,21 +2865,38 @@ mod tests {
     use smithay::utils::{Point, Size};
 
     #[test]
-    fn sound_scroll_reaches_inputs_after_many_outputs() {
+    fn the_sound_page_lays_out_every_output_and_input_for_scrolling() {
         let device =
             |name: &str| AudioOutput { name: name.into(), description: name.into(), icon: "audio-card", active: false };
-        let mut panel = DetailPanel {
-            outputs: vec![device("one"), device("two"), device("three")],
+        let panel = DetailPanel {
+            outputs: (0..12).map(|n| device(&format!("out {n}"))).collect(),
             inputs: Some(vec![device("microphone")]),
             ..Default::default()
         };
-        let body = local_rect(0, 0, 300, DETAIL_SECTION + SP3 + DETAIL_CARD);
-        let status = crate::system_info::SystemStatus::default();
-        let input = |item: &DetailItem| item.kind == ItemKind::Input(0);
-        assert!(!detail_items(&panel, Detail::Sound, &status, body, None).iter().any(input));
-        panel.sound_scroll = 3;
-        let items = detail_items(&panel, Detail::Sound, &status, body, None);
-        assert!(items.iter().any(|item| item.kind == ItemKind::Input(0)));
+        let mut bar = Topbar::new(TopbarTheme::default());
+        bar.qs_panel = panel;
+        let page = bar.page(None, Detail::Sound);
+        assert!(page.overflow > 0, "twelve outputs overflow the page");
+        let items = detail_items(&bar.qs_panel, Detail::Sound, bar.system_status(), page.content_body(), None);
+        let input = items.iter().find(|item| item.kind == ItemKind::Input(0)).expect("the input is laid out");
+        assert!(page.on_screen(input.rect, 0).is_none(), "below the fold at first");
+        assert!(page.on_screen(input.rect, page.overflow).is_some(), "on screen at the end");
+    }
+
+    #[test]
+    fn a_partly_visible_row_is_clipped_to_the_viewport() {
+        let page = Page::new(1000, 640, Detail::Wifi);
+        let bottom = page.body.loc.y + page.body.size.h;
+        let row = local_rect(10, bottom - 20, 300, 48);
+        assert_eq!(page.on_screen(row, 0), Some(local_rect(10, bottom - 20, 300, 20)));
+        assert_eq!(page.wholly_on_screen(row, 0), None, "spinners and sliders skip half-hidden rows");
+        assert_eq!(page.wholly_on_screen(row, 28), Some(local_rect(10, bottom - 48, 300, 48)));
+        let [header, body, footer] = page.bands(page.overflow).expect("it overflows");
+        assert_eq!(header, (0, 0, page.body.loc.y));
+        assert_eq!(body, (page.body.loc.y + page.overflow, page.body.loc.y, page.body.size.h));
+        assert_eq!(footer.0, bottom + page.overflow, "the footer is read from the bottom of the tall raster");
+        assert_eq!(footer.1 + footer.2, page.height);
+        assert_eq!(Page::new(500, 640, Detail::Wifi).bands(0), None, "a page that fits has no bands");
     }
 
     fn output() -> Rectangle<i32, Logical> {
@@ -2862,26 +2996,46 @@ mod tests {
     }
 
     #[test]
-    fn a_long_list_shows_a_thumb_that_follows_the_scroll() {
+    fn a_long_list_scrolls_by_pixels_with_a_thumb_that_follows() {
+        use crate::system_info::ScrollDelta;
         let mut bar = open_wifi();
-        let geometry = detail_geometry(super::super::QS_PAGE_MAX, true, true);
-        let thumb = |bar: &Topbar| {
-            let items = detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), geometry.body, None);
-            list_thumb(&bar.qs_panel, Detail::Wifi, &items, super::super::QS_WIDTH)
+        let settle = |bar: &mut Topbar| {
+            let page = bar.page(None, Detail::Wifi);
+            follow_scroll(&mut bar.qs_panel, &page, None);
+            page
         };
-        assert_eq!(thumb(&bar), None, "three networks fit");
+        let page = settle(&mut bar);
+        assert_eq!(page.thumb(0, super::super::QS_WIDTH), None, "three networks fit");
+        assert!(!bar.scroll_detail_by(ScrollDelta::Continuous(40.0)), "a page that fits does not scroll");
         let many = (0..20).map(|n| network(&format!("Net {n}"), true, n == 0)).collect();
         bar.apply_net_event(NetEvent::Wifi(many));
-        let top = thumb(&bar).expect("twenty do not");
-        assert!(top.loc.x > geometry.body.loc.x + geometry.body.size.w, "in the right gutter, clear of the rows");
-        assert!(bar.scroll_detail_list(5));
-        let lower = thumb(&bar).expect("still scrolled");
-        assert!(lower.loc.y > top.loc.y, "it moves down with the list");
-        assert!(bar.scroll_detail_list(100));
-        let bottom = thumb(&bar).expect("at the end");
-        let items = detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), geometry.body, None);
-        let last = items.iter().rfind(|item| matches!(item.kind, ItemKind::Network(_))).expect("a row");
-        assert_eq!(bottom.loc.y + bottom.size.h, last.rect.loc.y + last.rect.size.h, "and ends with the last row");
+        let page = settle(&mut bar);
+        let top = page.thumb(0, super::super::QS_WIDTH).expect("twenty do not");
+        assert!(top.loc.x > page.body.loc.x + page.body.size.w, "in the right gutter, clear of the rows");
+        assert!(bar.scroll_detail_by(ScrollDelta::Continuous(100.0)), "a finger moves the list 1:1");
+        assert_eq!(bar.qs_panel.drawn_offset(), 100);
+        let lower = page.thumb(bar.qs_panel.drawn_offset(), super::super::QS_WIDTH).expect("scrolled");
+        assert!(lower.loc.y > top.loc.y, "the thumb moves down with the list");
+        assert!(!bar.scroll_detail_by(ScrollDelta::Stop), "lifting the fingers changes nothing");
+        assert!(bar.scroll_detail_by(ScrollDelta::Wheel(12_000.0)));
+        assert_eq!(bar.qs_panel.target_offset(), page.overflow, "a wheel run stops at the end");
+        let bottom = page.thumb(page.overflow, super::super::QS_WIDTH).expect("at the end");
+        assert_eq!(bottom.loc.y + bottom.size.h, page.body.loc.y + page.body.size.h);
+        relayout(&mut bar);
+        let last = u16::try_from(page_last_network(&bar)).expect("an index");
+        assert!(bar.slot_rect(Slot::QsDetailRow(last)).is_some(), "the last row is clickable once scrolled to");
+        bar.apply_net_event(NetEvent::Wifi(vec![network("Home", true, true)]));
+        settle(&mut bar);
+        assert_eq!(bar.qs_panel.target_offset(), 0, "a list that shrinks pulls the offset back");
+    }
+
+    fn page_last_network(bar: &Topbar) -> usize {
+        let page = bar.page(None, Detail::Wifi);
+        detail_items(&bar.qs_panel, Detail::Wifi, bar.system_status(), page.content_body(), None)
+            .iter()
+            .rev()
+            .find_map(|item| if let ItemKind::Network(index) = item.kind { Some(index) } else { None })
+            .expect("a network row")
     }
 
     #[test]

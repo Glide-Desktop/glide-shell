@@ -3238,25 +3238,20 @@ impl GlideState {
             self.scroll_tray(id, delta);
             return true;
         }
-        let steps = self.topbar.scroll_steps(delta);
-        if steps == 0 {
-            return true;
-        }
         let inside_popup = self.topbar.popup_rect().is_some_and(|rect| {
             pos.x >= f64::from(rect.loc.x)
                 && pos.y >= f64::from(rect.loc.y)
                 && pos.x < f64::from(rect.loc.x + rect.size.w)
                 && pos.y < f64::from(rect.loc.y + rect.size.h)
         });
-        if inside_popup
-            && matches!(
-                self.topbar.detail(),
-                Some(crate::topbar::Detail::Sound | crate::topbar::Detail::Wifi | crate::topbar::Detail::Bluetooth)
-            )
-        {
-            if self.topbar.scroll_detail_list(steps) {
+        if inside_popup && self.topbar.detail().is_some() {
+            if self.topbar.scroll_detail_by(delta) {
                 self.queue_redraw();
             }
+            return true;
+        }
+        let steps = self.topbar.scroll_steps(delta);
+        if steps == 0 {
             return true;
         }
         let Some(slot) = slot else {
